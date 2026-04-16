@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"C:/Users/green/Desktop/스팸데이터\" log --oneline)",
+      "Bash(curl -s http://localhost:8001/docs)",
+      "Bash(curl -s http://localhost:5174)",
+      "Bash(pkill -f \"uvicorn\")",
+      "Bash(nohup python:*)",
+      "Bash(curl -s http://localhost:8001/spam-keywords -H \"Authorization: Bearer dummy\")",
+      "Bash(curl -s -X POST http://localhost:8001/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"password\":\"admin123\"}')",
+      "Bash(python -c \"from backend import app; print\\('OK'\\)\")",
+      "Bash(npx vue-tsc:*)",
+      "Bash(npm run:*)",
+      "Bash(ls \"/c/Users/green/Desktop/스팸데이터/frontend/\"tsconfig*)",
+      "Bash(npm install:*)",
+      "Bash(python -c ':*)",
+      "Bash(python -c \"import sqlite3; conn = sqlite3.connect\\('C:/Users/green/Desktop/스팸데이터/backend/spam_chat.db'\\); conn.execute\\(\\\\\"INSERT OR REPLACE INTO system_settings \\(key, value\\) VALUES \\('report_enabled', 'true'\\)\\\\\"\\); conn.commit\\(\\); print\\(list\\(conn.execute\\('SELECT * FROM system_settings'\\).fetchall\\(\\)\\)\\); conn.close\\(\\)\")",
+      "Bash(python fix_setting.py)",
+      "Bash(del \"C:/Users/green/Desktop/스팸데이터/fix_setting.py\")",
+      "Bash(python del_spam_kw.py)",
+      "Bash(python3 -c ':*)",
+      "Bash(python -c \"content = open\\(r'C:\\\\Users\\\\green\\\\Desktop\\\\스팸데이터\\\\frontend\\\\src\\\\views\\\\AdminView.vue', encoding='utf-8'\\).read\\(\\); idx = content.find\\('상담사 평가'\\); print\\(repr\\(content[idx-10:idx+300]\\)\\)\")",
+      "Bash(python -c 'content = open\\(r'\\\\''C:\\\\Users\\\\green\\\\Desktop\\\\스팸데이터\\\\frontend\\\\src\\\\views\\\\AdminView.vue'\\\\'', encoding='\\\\''utf-8'\\\\''\\).read\\(\\); idx = content.find\\('\\\\''profile'\\\\''\\); all_idx = []; start=0:*)",
+      "Bash(grep -E \"\\\\.\\(csv|xlsx|json|txt|ipynb|py\\)$\")"
+    ],
+    "defaultMode": "bypassPermissions"
+  }
+}
