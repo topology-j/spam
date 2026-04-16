@@ -21,7 +21,8 @@
       "Bash(python3 -c ':*)",
       "Bash(python -c \"content = open\\(r'C:\\\\Users\\\\green\\\\Desktop\\\\스팸데이터\\\\frontend\\\\src\\\\views\\\\AdminView.vue', encoding='utf-8'\\).read\\(\\); idx = content.find\\('상담사 평가'\\); print\\(repr\\(content[idx-10:idx+300]\\)\\)\")",
       "Bash(python -c 'content = open\\(r'\\\\''C:\\\\Users\\\\green\\\\Desktop\\\\스팸데이터\\\\frontend\\\\src\\\\views\\\\AdminView.vue'\\\\'', encoding='\\\\''utf-8'\\\\''\\).read\\(\\); idx = content.find\\('\\\\''profile'\\\\''\\); all_idx = []; start=0:*)",
-      "Bash(grep -E \"\\\\.\\(csv|xlsx|json|txt|ipynb|py\\)$\")"
+      "Bash(grep -E \"\\\\.\\(csv|xlsx|json|txt|ipynb|py\\)$\")",
+      "Bash(gh repo:*)"
     ],
     "defaultMode": "bypassPermissions"
   }

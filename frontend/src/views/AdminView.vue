@@ -787,20 +787,6 @@ onMounted(() => { loadReports(); loadProfile(); loadSettings() })
         <div class="eval-body">
           <!-- 평가 데이터셋 선택 -->
           <div class="eval-dataset-row">
-            <div class="eval-dataset-card" @click="!evalRunning && runEvalBy('test')" :class="{running: evalRunningType==='test'}">
-              <div class="eds-top">
-                <span class="eds-badge test">테스트셋</span>
-                <span class="eds-pct">15%</span>
-              </div>
-              <div class="eds-title">Test Data</div>
-              <div class="eds-desc">최종 성능 측정용<br/>spam.csv에서 분할</div>
-              <button class="btn-run-eval eds-btn" :disabled="evalRunning">
-                <svg v-if="evalRunningType!=='test'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                <span v-else class="spinner-xs" style="border-color:rgba(255,255,255,0.4);border-top-color:#fff;width:10px;height:10px"/>
-                {{ evalRunningType==='test' ? '평가 중...' : '평가 실행' }}
-              </button>
-            </div>
-
             <div class="eval-dataset-card" @click="!evalRunning && runEvalBy('val')" :class="{running: evalRunningType==='val'}">
               <div class="eds-top">
                 <span class="eds-badge val">검증셋</span>
@@ -815,16 +801,17 @@ onMounted(() => { loadReports(); loadProfile(); loadSettings() })
               </button>
             </div>
 
-            <div class="eval-dataset-card" @click="!evalRunning && runEvalBy('chat')" :class="{running: evalRunningType==='chat'}">
+            <div class="eval-dataset-card" @click="!evalRunning && runEvalBy('test')" :class="{running: evalRunningType==='test'}">
               <div class="eds-top">
-                <span class="eds-badge chat">실사용</span>
+                <span class="eds-badge test">테스트셋</span>
+                <span class="eds-pct">15%</span>
               </div>
-              <div class="eds-title">실제 채팅 데이터</div>
-              <div class="eds-desc">사용자 실제 입력 기반<br/>채팅 누적 시 사용</div>
+              <div class="eds-title">Test Data</div>
+              <div class="eds-desc">최종 성능 측정용<br/>spam.csv에서 분할</div>
               <button class="btn-run-eval eds-btn" :disabled="evalRunning">
-                <svg v-if="evalRunningType!=='chat'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <svg v-if="evalRunningType!=='test'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                 <span v-else class="spinner-xs" style="border-color:rgba(255,255,255,0.4);border-top-color:#fff;width:10px;height:10px"/>
-                {{ evalRunningType==='chat' ? '평가 중...' : '평가 실행' }}
+                {{ evalRunningType==='test' ? '평가 중...' : '평가 실행' }}
               </button>
             </div>
           </div>
