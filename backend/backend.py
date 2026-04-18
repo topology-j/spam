@@ -1192,6 +1192,8 @@ def _get_embeddings(client, texts: list, batch_size=100):
 
 def _eval_with_model(rows, model_fn):
     tp = tn = fp = fn = 0
+    fp_list = []  # 오탐: 정상인데 스팸으로 잘못 판정
+    fn_list = []  # 미탐: 스팸인데 정상으로 놓침
     for row in rows:
         actual_spam = (row["label"] == "spam")
         try:
@@ -1199,10 +1201,17 @@ def _eval_with_model(rows, model_fn):
             predicted_spam = result.get("is_spam", False)
         except Exception:
             predicted_spam = False
-        if actual_spam and predicted_spam:           tp += 1
-        elif not actual_spam and not predicted_spam: tn += 1
-        elif not actual_spam and predicted_spam:     fp += 1
-        elif actual_spam and not predicted_spam:     fn += 1
+        text_preview = row["text"][:120]
+        if actual_spam and predicted_spam:
+            tp += 1
+        elif not actual_spam and not predicted_spam:
+            tn += 1
+        elif not actual_spam and predicted_spam:
+            fp += 1
+            fp_list.append(text_preview)
+        elif actual_spam and not predicted_spam:
+            fn += 1
+            fn_list.append(text_preview)
     total = tp + tn + fp + fn
     accuracy  = (tp + tn) / total if total else 0
     precision = tp / (tp + fp) if (tp + fp) else 0
@@ -1212,6 +1221,8 @@ def _eval_with_model(rows, model_fn):
         "total": total, "tp": tp, "tn": tn, "fp": fp, "fn": fn,
         "accuracy": round(accuracy, 4), "precision": round(precision, 4),
         "recall": round(recall, 4), "f1": round(f1, 4),
+        "fp_list": fp_list,
+        "fn_list": fn_list,
     }
 
 @app.get("/rag/val")
@@ -1232,15 +1243,24 @@ def rag_val(split: str = "val", max_samples: int = 120, mode: str = "fast", user
     if mode == "fast":
         from rag_engine import fast_classify
         tp = tn = fp = fn = 0
+        fp_list = []
+        fn_list = []
         for row in rows:
-            actual_spam = (row["label"] == "spam") if isinstance(row, dict) else (row["label"] == "spam")
-            text = row["text"] if isinstance(row, dict) else row["text"]
+            actual_spam = (row["label"] == "spam")
+            text = row["text"]
             result = fast_classify(text)
             predicted_spam = bool(result) if result is not None else False
-            if actual_spam and predicted_spam:           tp += 1
-            elif not actual_spam and not predicted_spam: tn += 1
-            elif not actual_spam and predicted_spam:     fp += 1
-            elif actual_spam and not predicted_spam:     fn += 1
+            text_preview = text[:120]
+            if actual_spam and predicted_spam:
+                tp += 1
+            elif not actual_spam and not predicted_spam:
+                tn += 1
+            elif not actual_spam and predicted_spam:
+                fp += 1
+                fp_list.append(text_preview)
+            elif actual_spam and not predicted_spam:
+                fn += 1
+                fn_list.append(text_preview)
         total = tp + tn + fp + fn
         accuracy  = (tp + tn) / total if total else 0
         precision = tp / (tp + fp) if (tp + fp) else 0
@@ -1251,6 +1271,8 @@ def rag_val(split: str = "val", max_samples: int = 120, mode: str = "fast", user
             "total": total, "tp": tp, "tn": tn, "fp": fp, "fn": fn,
             "accuracy": round(accuracy, 4), "precision": round(precision, 4),
             "recall": round(recall, 4), "f1": round(f1, 4),
+            "fp_list": fp_list,
+            "fn_list": fn_list,
         }
         return {
             "split": split,

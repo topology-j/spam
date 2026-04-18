@@ -70,6 +70,8 @@ interface Metrics {
   tn: number
   fp: number
   fn: number
+  fp_list: string[]
+  fn_list: string[]
 }
 
 interface ValResult {
@@ -752,6 +754,18 @@ onMounted(async () => {
               </div>
             </div>
             <p class="confusion">TP {{ valResult.gpt.tp }} · TN {{ valResult.gpt.tn }} · FP {{ valResult.gpt.fp }} · FN {{ valResult.gpt.fn }}</p>
+            <div v-if="valResult.gpt.fp_list?.length" class="detail-section">
+              <p class="detail-label fp-label">🚨 오탐 (정상 → 스팸 판정, {{ valResult.gpt.fp_list.length }}건)</p>
+              <ul class="detail-list">
+                <li v-for="(txt, i) in valResult.gpt.fp_list" :key="'gpt-fp-'+i" class="detail-item fp-item">{{ txt }}</li>
+              </ul>
+            </div>
+            <div v-if="valResult.gpt.fn_list?.length" class="detail-section">
+              <p class="detail-label fn-label">❌ 미탐 (스팸 → 정상 판정, {{ valResult.gpt.fn_list.length }}건)</p>
+              <ul class="detail-list">
+                <li v-for="(txt, i) in valResult.gpt.fn_list" :key="'gpt-fn-'+i" class="detail-item fn-item">{{ txt }}</li>
+              </ul>
+            </div>
           </article>
 
           <article class="model-card">
@@ -779,6 +793,18 @@ onMounted(async () => {
               </div>
             </div>
             <p class="confusion">TP {{ valResult.qwen.tp }} · TN {{ valResult.qwen.tn }} · FP {{ valResult.qwen.fp }} · FN {{ valResult.qwen.fn }}</p>
+            <div v-if="valResult.qwen.fp_list?.length" class="detail-section">
+              <p class="detail-label fp-label">🚨 오탐 (정상 → 스팸 판정, {{ valResult.qwen.fp_list.length }}건)</p>
+              <ul class="detail-list">
+                <li v-for="(txt, i) in valResult.qwen.fp_list" :key="'qwen-fp-'+i" class="detail-item fp-item">{{ txt }}</li>
+              </ul>
+            </div>
+            <div v-if="valResult.qwen.fn_list?.length" class="detail-section">
+              <p class="detail-label fn-label">❌ 미탐 (스팸 → 정상 판정, {{ valResult.qwen.fn_list.length }}건)</p>
+              <ul class="detail-list">
+                <li v-for="(txt, i) in valResult.qwen.fn_list" :key="'qwen-fn-'+i" class="detail-item fn-item">{{ txt }}</li>
+              </ul>
+            </div>
           </article>
         </div>
 
@@ -1399,6 +1425,50 @@ onMounted(async () => {
 .list-item p,
 .list-item small {
   color: #6b7280;
+}
+
+.detail-section {
+  margin-top: 14px;
+}
+
+.detail-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.fp-label { color: #b45309; }
+.fn-label { color: #dc2626; }
+
+.detail-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.detail-item {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.fp-item {
+  background: #fef3c7;
+  border-left: 3px solid #f59e0b;
+  color: #78350f;
+}
+
+.fn-item {
+  background: #fee2e2;
+  border-left: 3px solid #ef4444;
+  color: #7f1d1d;
 }
 
 .metric-list {
