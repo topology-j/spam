@@ -19,6 +19,16 @@ import csv
 # ?????????????????????????????
 app = FastAPI()
 
+
+@app.on_event("startup")
+def on_startup():
+    try:
+        from rag_engine import _load_vectorstore
+        _load_vectorstore()
+    except Exception:
+        pass
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1413,16 +1423,48 @@ def rag_improve_history_clear(user=Depends(require_role("admin"))):
     return {"message": "?대젰 珥덇린???꾨즺"}
 
 
+@app.post("/rag/reload")
+def rag_reload(user=Depends(require_role("admin"))):
+    """벡터스토어 디스크에서 강제 리로드"""
+    import rag_engine, pickle, faiss, numpy as np
+    vs_dir = rag_engine.VS_DIR
+    index_path = os.path.join(vs_dir, "spam.index")
+    meta_path = os.path.join(vs_dir, "metadata.pkl")
+    try:
+        with open(index_path, "rb") as f:
+            new_index = faiss.deserialize_index(np.frombuffer(f.read(), dtype=np.uint8))
+        with open(meta_path, "rb") as f:
+            new_meta = pickle.load(f)
+        rag_engine._index = new_index
+        rag_engine._metadata = new_meta
+        count = new_index.ntotal
+        spam_cnt = new_meta["labels"].count("spam")
+        ham_cnt = new_meta["labels"].count("ham")
+        return {"ok": True, "vector_count": count, "spam_count": spam_cnt, "ham_count": ham_cnt, "path": vs_dir}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "path": vs_dir}
+
+
 @app.get("/rag/status")
 def rag_status(user=Depends(require_role("admin"))):
     """RAG 踰≫꽣?ㅽ넗???꾪솴"""
     if not _rag_available:
         return {"available": False, "vector_count": 0}
     try:
-        from rag_engine import _index, _metadata
-        count = _index.ntotal if _index else 0
-        spam_cnt = _metadata["labels"].count("spam") if _metadata else 0
-        ham_cnt = _metadata["labels"].count("ham") if _metadata else 0
+        import pickle, faiss, numpy as np
+        import rag_engine
+        vs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vectorstore")
+        idx_path = os.path.join(vs_dir, "spam.index")
+        file_size = os.path.getsize(idx_path)
+        with open(idx_path, "rb") as f:
+            idx = faiss.deserialize_index(np.frombuffer(f.read(), dtype=np.uint8))
+        with open(os.path.join(vs_dir, "metadata.pkl"), "rb") as f:
+            meta = pickle.load(f)
+        rag_engine._index = idx
+        rag_engine._metadata = meta
+        count = idx.ntotal
+        spam_cnt = meta["labels"].count("spam")
+        ham_cnt = meta["labels"].count("ham")
         return {"available": True, "vector_count": count, "spam_count": spam_cnt, "ham_count": ham_cnt}
     except Exception as e:
         return {"available": False, "error": str(e)}
@@ -1493,3 +1535,6 @@ def finetune_apply(job_id: str, user=Depends(require_role("admin"))):
 @app.get("/")
 def root():
     return {"status": "ok"}
+
+
+

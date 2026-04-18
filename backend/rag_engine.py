@@ -30,6 +30,7 @@ def _load_vectorstore():
     global _index, _metadata
     index_path = os.path.join(VS_DIR, "spam.index")
     meta_path = os.path.join(VS_DIR, "metadata.pkl")
+    print(f"[DEBUG] VS_DIR={VS_DIR}, index={os.path.getsize(index_path) if os.path.exists(index_path) else 'missing'} bytes")
     if os.path.exists(index_path) and os.path.exists(meta_path):
         # 한글 경로 대응: Python으로 bytes 읽어서 deserialize
         with open(index_path, "rb") as f:
@@ -169,6 +170,21 @@ def _parse_result(answer: str, model_name: str, examples: list[dict]) -> dict:
     }
 
 
+def _has_spam_signals(text: str) -> bool:
+    suspicious_terms = (
+        "[url]",
+        "계정",
+        "결제",
+        "링크",
+        "제한",
+        "즉시",
+        "비정상",
+        "접근",
+    )
+    text_lower = text.lower()
+    return any(term in text_lower for term in suspicious_terms)
+
+
 def fast_classify(text: str, k: int = 7) -> bool:
     """
     GPT 호출 없는 빠른 분류 (임베딩 유사도 다수결 투표).
@@ -177,8 +193,14 @@ def fast_classify(text: str, k: int = 7) -> bool:
     examples = _retrieve(text, k=k)
     if not examples:
         return None
+    first = examples[0]
     spam_votes = sum(1 for e in examples if e["label"] == "spam")
-    return spam_votes > len(examples) / 2
+    strong_spam_match = (
+        first["label"] == "spam"
+        and first["distance"] <= 1.24
+        and spam_votes >= 5
+    )
+    return strong_spam_match and _has_spam_signals(text)
 
 
 _load_vectorstore()
