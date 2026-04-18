@@ -5,16 +5,40 @@ import sys
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import os
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
+
+# LangSmith SDK uses LANGSMITH_* env vars. Keep compatibility with older
+# LANGCHAIN_* settings already present in this project.
+if os.getenv("LANGCHAIN_TRACING_V2") and not os.getenv("LANGSMITH_TRACING"):
+    os.environ["LANGSMITH_TRACING"] = os.getenv("LANGCHAIN_TRACING_V2", "")
+if os.getenv("LANGCHAIN_API_KEY") and not os.getenv("LANGSMITH_API_KEY"):
+    os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGCHAIN_API_KEY", "")
+if os.getenv("LANGCHAIN_PROJECT") and not os.getenv("LANGSMITH_PROJECT"):
+    os.environ["LANGSMITH_PROJECT"] = os.getenv("LANGCHAIN_PROJECT", "")
+if os.getenv("LANGCHAIN_ENDPOINT") and not os.getenv("LANGSMITH_ENDPOINT"):
+    os.environ["LANGSMITH_ENDPOINT"] = os.getenv("LANGCHAIN_ENDPOINT", "")
+if not os.getenv("LANGSMITH_ENDPOINT"):
+    os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
+
 import pickle
 import faiss
 import numpy as np
 import requests
 from openai import OpenAI
-from dotenv import load_dotenv
+from langsmith import traceable
+from langsmith.wrappers import wrap_openai
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
+print(
+    "[LangSmith] "
+    f"TRACING={os.getenv('LANGSMITH_TRACING')} "
+    f"PROJECT={os.getenv('LANGSMITH_PROJECT')} "
+    f"ENDPOINT={os.getenv('LANGSMITH_ENDPOINT')} "
+    f"KEY={os.getenv('LANGSMITH_API_KEY','')[:15]}..."
+)
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = wrap_openai(OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
 
 VS_DIR = os.path.join(os.path.dirname(__file__), "vectorstore")
 os.makedirs(VS_DIR, exist_ok=True)
@@ -32,14 +56,12 @@ def _load_vectorstore():
     meta_path = os.path.join(VS_DIR, "metadata.pkl")
     print(f"[DEBUG] VS_DIR={VS_DIR}, index={os.path.getsize(index_path) if os.path.exists(index_path) else 'missing'} bytes")
     if os.path.exists(index_path) and os.path.exists(meta_path):
-        # 한글 경로 대응: Python으로 bytes 읽어서 deserialize
         with open(index_path, "rb") as f:
             _index = faiss.deserialize_index(np.frombuffer(f.read(), dtype=np.uint8))
         with open(meta_path, "rb") as f:
             _metadata = pickle.load(f)
         print(f"✅ FAISS 벡터스토어 로드 완료 ({_index.ntotal}개 벡터)")
     else:
-        # 빈 인덱스 초기화
         _index = faiss.IndexFlatL2(EMBED_DIM)
         _metadata = {"texts": [], "labels": []}
         print("⚠️  벡터스토어 없음 → 빈 인덱스로 초기화 (build_vectorstore.py로 학습 데이터 추가 권장)")
@@ -53,6 +75,7 @@ def _save_vectorstore():
         pickle.dump(_metadata, f)
 
 
+@traceable(name="embed_query")
 def _embed_query(text: str) -> np.ndarray:
     response = client.embeddings.create(
         model="text-embedding-3-small",
@@ -61,6 +84,7 @@ def _embed_query(text: str) -> np.ndarray:
     return np.array([response.data[0].embedding], dtype="float32")
 
 
+@traceable(name="retrieve")
 def _retrieve(text: str, k: int = 5) -> list[dict]:
     if _index is None or _index.ntotal == 0:
         return []
@@ -117,7 +141,9 @@ def _build_prompt(query: str, examples: list[dict]) -> str:
 신뢰도: 높음 / 중간 / 낮음"""
 
 
+@traceable(name="classify_with_gpt")
 def classify_with_gpt(text: str, examples: list[dict] = None, model: str = "gpt-4o-mini") -> dict:
+    print(f"[LangSmith] classify_with_gpt path active model={_finetune_model or model}")
     active_model = _finetune_model or model
     if examples is None:
         examples = _retrieve(text)
@@ -133,7 +159,9 @@ def classify_with_gpt(text: str, examples: list[dict] = None, model: str = "gpt-
     return _parse_result(answer, model_label, examples)
 
 
+@traceable(name="classify_with_qwen")
 def classify_with_qwen(text: str, examples: list[dict] = None) -> dict:
+    print("[LangSmith] classify_with_qwen path active")
     if examples is None:
         examples = _retrieve(text)
     prompt = _build_prompt(text, examples)
@@ -185,6 +213,7 @@ def _has_spam_signals(text: str) -> bool:
     return any(term in text_lower for term in suspicious_terms)
 
 
+@traceable(name="fast_classify")
 def fast_classify(text: str, k: int = 7) -> bool:
     """
     GPT 호출 없는 빠른 분류 (임베딩 유사도 다수결 투표).

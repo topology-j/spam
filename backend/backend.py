@@ -1,6 +1,10 @@
 ﻿import sys
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+import os
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
+
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -13,6 +17,10 @@ from typing import Optional, List
 import os
 import io
 import csv
+import uuid
+from datetime import datetime, timedelta, timezone
+from langsmith import traceable
+from langsmith import Client as LangSmithClient
 
 # ?????????????????????????????
 # APP
@@ -23,6 +31,13 @@ app = FastAPI()
 @app.on_event("startup")
 def on_startup():
     try:
+        print(
+            "[LangSmith][startup] "
+            f"TRACING={os.getenv('LANGSMITH_TRACING') or os.getenv('LANGCHAIN_TRACING_V2')} "
+            f"PROJECT={os.getenv('LANGSMITH_PROJECT') or os.getenv('LANGCHAIN_PROJECT')} "
+            f"ENDPOINT={os.getenv('LANGSMITH_ENDPOINT') or os.getenv('LANGCHAIN_ENDPOINT') or 'https://api.smith.langchain.com'} "
+            f"KEY={(os.getenv('LANGSMITH_API_KEY') or os.getenv('LANGCHAIN_API_KEY') or '')[:15]}..."
+        )
         from rag_engine import _load_vectorstore
         _load_vectorstore()
     except Exception:
@@ -46,6 +61,49 @@ TOKEN_EXPIRE_HOURS = 24
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
+_langsmith_client = None
+
+
+def get_langsmith_client():
+    global _langsmith_client
+    if _langsmith_client is None:
+        api_key = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+        api_url = os.getenv("LANGSMITH_ENDPOINT") or os.getenv("LANGCHAIN_ENDPOINT") or "https://api.smith.langchain.com"
+        if api_key:
+            _langsmith_client = LangSmithClient(api_key=api_key, api_url=api_url)
+    return _langsmith_client
+
+
+def log_input_to_langsmith(run_name: str, text: str, username: str):
+    client = get_langsmith_client()
+    if client is None:
+        print(f"[LangSmith][manual] client unavailable, skipping raw input logging for {run_name}")
+        return
+    run_id = uuid.uuid4()
+    project_name = os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "default"
+    now = datetime.now(timezone.utc)
+    client.create_run(
+        name=run_name,
+        run_type="chain",
+        project_name=project_name,
+        inputs={"text": text, "username": username},
+        id=run_id,
+        start_time=now,
+    )
+    client.update_run(
+        run_id,
+        end_time=now,
+        outputs={"text": text, "username": username},
+    )
+    print(f"[LangSmith][manual] logged {run_name} text={text!r} username={username}")
+
+
+def log_chat_input_to_langsmith(text: str, username: str):
+    log_input_to_langsmith("chat_input_raw", text, username)
+
+
+def log_report_input_to_langsmith(text: str, username: str):
+    log_input_to_langsmith("report_input_raw", text, username)
 
 # ?????????????????????????????
 # DB
@@ -495,9 +553,13 @@ def get_my_reports(user=Depends(get_current_user)):
 
 
 @app.post("/spam-reports")
+@traceable(name="report_create")
 def create_report(req: ReportReq, user=Depends(get_current_user)):
-    if not req.email_content.strip():
+    text = req.email_content.strip()
+    if not text:
         raise HTTPException(status_code=400, detail="?댁슜???낅젰?댁＜?몄슂")
+    print(f"[LangSmith][path] /spam-reports received username={user['username']} text={text[:80]!r}")
+    log_report_input_to_langsmith(text=text, username=user["username"])
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT value FROM system_settings WHERE key='report_enabled'")
@@ -508,10 +570,16 @@ def create_report(req: ReportReq, user=Depends(get_current_user)):
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO spam_reports (user_id, email_content) VALUES (?, ?)",
-        (user["id"], req.email_content.strip())
+        (user["id"], text)
     )
     conn.commit()
     conn.close()
+    try:
+        from langchain_core.tracers.langchain import wait_for_all_tracers
+        wait_for_all_tracers()
+        print("[LangSmith][flush] wait_for_all_tracers completed for /spam-reports")
+    except Exception as e:
+        print(f"[LangSmith][flush] helper unavailable for /spam-reports: {e}")
     return {"message": "?좉퀬 ?묒닔 ?꾨즺"}
 
 
@@ -663,7 +731,9 @@ def _build_model_reply(model_name: str, result: dict) -> dict:
     }
 
 
+@traceable(name="chat_classify_with_both_models")
 def _classify_with_both_models(text: str) -> list[dict]:
+    print(f"[LangSmith][path] /chat -> _classify_with_both_models text_len={len(text)}")
     if not _rag_available:
         is_spam = detect_spam(text)
         fallback_verdict = "?ㅽ뙵" if is_spam else "?뺤긽"
@@ -701,10 +771,13 @@ def _classify_with_both_models(text: str) -> list[dict]:
 SPAM_LIST_KEYWORDS = ["스팸 단어", "스팸 목록", "스팸 키워드", "spam list", "스팸 리스트", "등록된 키워드", "키워드 목록"]
 
 @app.post("/chat")
+@traceable(name="chat_endpoint")
 def chat(req: ChatReq, user=Depends(get_current_user)):
     text = req.message.strip()
     if not text:
         raise HTTPException(status_code=400, detail="메시지를 입력해주세요")
+    print(f"[LangSmith][path] /chat received username={user['username']} text={text[:80]!r}")
+    log_chat_input_to_langsmith(text=text, username=user["username"])
 
     conn = get_db()
     cur = conn.cursor()
@@ -746,6 +819,12 @@ def chat(req: ChatReq, user=Depends(get_current_user)):
 
     conn.commit()
     conn.close()
+    try:
+        from langchain_core.tracers.langchain import wait_for_all_tracers
+        wait_for_all_tracers()
+        print("[LangSmith][flush] wait_for_all_tracers completed for /chat")
+    except Exception as e:
+        print(f"[LangSmith][flush] helper unavailable: {e}")
     return {"reply": replies[0]["reply"], "is_spam": final_is_spam, "replies": replies}
 
 
