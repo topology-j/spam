@@ -9,6 +9,20 @@ const auth = useAuthStore()
 const router = useRouter()
 const input = ref('')
 const chatBody = ref<HTMLElement | null>(null)
+const fileInput = ref<HTMLInputElement | null>(null)
+
+function openFilePicker() {
+  fileInput.value?.click()
+}
+
+async function onFileChange(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  ;(e.target as HTMLInputElement).value = ''
+  await store.sendFile(file)
+  await nextTick()
+  chatBody.value?.scrollTo({ top: chatBody.value.scrollHeight, behavior: 'smooth' })
+}
 
 function goDashboard() {
   const role = auth.role || localStorage.getItem('role')
@@ -69,6 +83,13 @@ const hasMessages = computed(() => store.messages.length > 0)
           <p class="header-sub">메일 내용을 입력하면 스팸 여부를 판별합니다</p>
         </div>
         <div class="header-right">
+          <button class="file-btn" @click="router.push('/file-check')" title="파일 스팸 판별">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+            </svg>
+            파일 판별
+          </button>
           <button v-if="isLoggedIn" class="dash-btn" @click="goDashboard()">대시보드</button>
           <button v-else class="dash-btn" @click="router.push('/login')">로그인</button>
           <button v-if="hasMessages" class="clear-btn" @click="store.clearMessages()" title="대화 초기화">
@@ -161,6 +182,14 @@ const hasMessages = computed(() => store.messages.length > 0)
 
       <!-- Input area -->
       <div class="input-area">
+        <input ref="fileInput" type="file" accept=".pdf,.txt,.eml" style="display:none" @change="onFileChange" />
+        <button class="upload-btn" :disabled="store.loading" @click="openFilePicker" title="파일 업로드 (PDF/TXT/EML)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </button>
         <textarea
           v-model="input"
           class="input"
@@ -242,6 +271,28 @@ const hasMessages = computed(() => store.messages.length > 0)
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.file-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1.5px solid #e5e7eb;
+  background: transparent;
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.file-btn:hover {
+  border-color: #667eea;
+  color: #667eea;
+  background: #f5f3ff;
 }
 
 .dash-btn {
@@ -478,6 +529,31 @@ const hasMessages = computed(() => store.messages.length > 0)
 
 .input::placeholder {
   color: #c4c4cc;
+}
+
+.upload-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  border: 1.5px solid #e5e7eb;
+  background: #f9fafb;
+  color: #667eea;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.upload-btn:hover:not(:disabled) {
+  background: #f0f0ff;
+  border-color: #667eea;
+}
+
+.upload-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .send-btn {

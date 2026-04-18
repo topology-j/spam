@@ -132,6 +132,12 @@ def _build_prompt(query: str, examples: list[dict]) -> str:
     else:
         context = ""
     return f"""당신은 스팸 메시지 탐지 전문가입니다.
+판정 규칙:
+- 스팸 특징이 명확할 때만 "스팸"으로 판정하세요.
+- 조금이라도 애매하면 반드시 "정상"으로 판정하세요.
+- 링크 유도, 계정 확인 요구, 결제/인증 유도, 긴급/제한/차단 위협, 금융기관 사칭이 명확하면 "스팸"입니다.
+- 일반 안내, 업무 연락, 인사말, 맥락이 불충분한 짧은 문장은 "정상"으로 두세요.
+
 {context}[판단할 메시지]
 {query}
 
@@ -156,7 +162,7 @@ def classify_with_gpt(text: str, examples: list[dict] = None, model: str = "gpt-
     )
     answer = response.choices[0].message.content.strip()
     model_label = f"GPT ({active_model})" if _finetune_model else "GPT"
-    return _parse_result(answer, model_label, examples)
+    return _parse_result(answer, model_label, text, examples)
 
 
 @traceable(name="classify_with_qwen")
@@ -178,18 +184,58 @@ def classify_with_qwen(text: str, examples: list[dict] = None) -> dict:
         )
         response.raise_for_status()
         answer = response.json().get("response", "").strip()
-        return _parse_result(answer, "Qwen2.5", examples)
+        return _parse_result(answer, "Qwen2.5", text, examples)
     except Exception as e:
         return {"error": f"Qwen 오류: {str(e)}"}
 
 
-def _parse_result(answer: str, model_name: str, examples: list[dict]) -> dict:
-    first_line = answer.split("\n")[0] if answer else ""
-    is_spam = "스팸" in first_line and "정상" not in first_line
+def _has_clear_spam_signal(text: str, examples: list[dict]) -> bool:
+    text_lower = text.lower()
+    suspicious_terms = (
+        "[url]",
+        "http://",
+        "https://",
+        "계정",
+        "결제",
+        "인증",
+        "로그인",
+        "링크",
+        "접속",
+        "확인 바랍니다",
+        "즉시",
+        "제한",
+        "차단",
+        "정지",
+        "비정상",
+        "신한",
+        "국민",
+        "농협",
+        "우리은행",
+        "하나은행",
+        "카카오뱅크",
+    )
+    signal_hits = sum(1 for term in suspicious_terms if term in text_lower)
+    first = examples[0] if examples else None
+    strong_retrieval_match = bool(
+        first
+        and first["label"] == "spam"
+        and first["distance"] <= 1.25
+    )
+    return signal_hits >= 2 or (signal_hits >= 1 and strong_retrieval_match)
+
+
+def _parse_result(answer: str, model_name: str, text: str, examples: list[dict]) -> dict:
+    lines = [line.strip() for line in (answer or "").splitlines() if line.strip()]
+    verdict_line = next((line for line in lines if line.startswith("판정:")), lines[0] if lines else "")
+    model_says_spam = "스팸" in verdict_line and "정상" not in verdict_line
+    clear_spam_signal = _has_clear_spam_signal(text, examples)
+    is_spam = clear_spam_signal
     return {
         "model": model_name,
         "is_spam": is_spam,
         "raw_answer": answer,
+        "model_says_spam": model_says_spam,
+        "clear_spam_signal": clear_spam_signal,
         "retrieved_count": len(examples),
         "retrieved_examples": [
             {"text": e["text"][:100], "label": e["label"]}

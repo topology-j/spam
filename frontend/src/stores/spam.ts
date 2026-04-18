@@ -53,9 +53,53 @@ export const useSpamStore = defineStore('spam', () => {
     }
   }
 
+  async function sendFile(file: File) {
+    messages.value.push({
+      id: nextId++,
+      role: 'user',
+      text: `📎 ${file.name}`,
+      timestamp: new Date(),
+    })
+    loading.value = true
+    try {
+      const token = localStorage.getItem('token') ?? ''
+      const form = new FormData()
+      form.append('file', file)
+      const res = await fetch('http://127.0.0.1:8000/chat/file', {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: form,
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: '서버 오류' }))
+        throw new Error(err.detail ?? '업로드 실패')
+      }
+      const data = await res.json()
+      const isSpam = data.is_spam as boolean
+      const modelLines = (data.replies as { model: string; reply: string }[])
+        .map(r => r.reply).join('\n\n')
+      messages.value.push({
+        id: nextId++,
+        role: 'result',
+        text: (isSpam ? '🚨 스팸 파일입니다\n\n' : '✅ 정상 파일입니다\n\n') + modelLines,
+        isSpam,
+        timestamp: new Date(),
+      })
+    } catch (e: unknown) {
+      messages.value.push({
+        id: nextId++,
+        role: 'result',
+        text: `⚠️ ${e instanceof Error ? e.message : '업로드 실패'}`,
+        timestamp: new Date(),
+      })
+    } finally {
+      loading.value = false
+    }
+  }
+
   function clearMessages() {
     messages.value = []
   }
 
-  return { messages, loading, sendMessage, clearMessages }
+  return { messages, loading, sendMessage, sendFile, clearMessages }
 })

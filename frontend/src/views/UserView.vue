@@ -7,7 +7,7 @@ const auth = useAuthStore()
 const router = useRouter()
 const API = 'http://127.0.0.1:8000'
 
-type Tab = 'chat' | 'report' | 'keywords' | 'rules' | 'profile'
+type Tab = 'chat' | 'file' | 'report' | 'keywords' | 'rules' | 'profile'
 
 interface Msg {
   id: number
@@ -60,6 +60,54 @@ const chatInput = ref('')
 const chatLoading = ref(false)
 const chatBody = ref<HTMLElement | null>(null)
 let nextId = 1
+
+// 파일 판별
+interface FileResult {
+  filename: string
+  is_spam: boolean
+  replies: { model: string; reply: string; is_spam: boolean }[]
+  extracted_text?: string
+}
+const fileResult = ref<FileResult | null>(null)
+const fileLoading = ref(false)
+const fileError = ref('')
+const isDragging = ref(false)
+const fileInputRef = ref<HTMLInputElement | null>(null)
+
+function onFileDragover(e: DragEvent) { e.preventDefault(); isDragging.value = true }
+function onFileDragleave() { isDragging.value = false }
+function onFileDrop(e: DragEvent) {
+  e.preventDefault(); isDragging.value = false
+  const f = e.dataTransfer?.files[0]
+  if (f) uploadFile(f)
+}
+function onFileInputChange(e: Event) {
+  const f = (e.target as HTMLInputElement).files?.[0]
+  if (f) uploadFile(f)
+  ;(e.target as HTMLInputElement).value = ''
+}
+async function uploadFile(file: File) {
+  fileError.value = ''; fileResult.value = null; fileLoading.value = true
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch(`${API}/chat/file`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${auth.token || localStorage.getItem('token') || ''}` },
+      body: form,
+    })
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail ?? '오류') }
+    const data = await res.json()
+    fileResult.value = {
+      filename: file.name,
+      is_spam: data.is_spam,
+      replies: data.replies ?? [],
+      extracted_text: data.text_preview ?? '',
+    }
+  } catch (e: unknown) {
+    fileError.value = e instanceof Error ? e.message : '업로드 실패'
+  } finally { fileLoading.value = false }
+}
 
 const reportInput = ref('')
 const reportLoading = ref(false)
@@ -376,6 +424,7 @@ onMounted(async () => {
 
         <nav class="nav">
           <button :class="['nav-btn', { active: activeTab === 'chat' }]" @click="activeTab = 'chat'">AI 판별</button>
+          <button :class="['nav-btn', { active: activeTab === 'file' }]" @click="activeTab = 'file'">파일 판별</button>
           <button :class="['nav-btn', { active: activeTab === 'report' }]" @click="activeTab = 'report'">상담 요청</button>
           <button :class="['nav-btn', { active: activeTab === 'keywords' }]" @click="activeTab = 'keywords'">스팸 단어 목록</button>
           <button :class="['nav-btn', { active: activeTab === 'rules' }]" @click="activeTab = 'rules'">내 규칙</button>
@@ -388,10 +437,11 @@ onMounted(async () => {
 
     <main class="main">
       <section v-if="activeTab === 'chat'" class="panel">
-        <div class="panel-header">
+<div class="panel-header">
           <div>
             <h2>AI 스팸 판별</h2>
             <p>문장을 입력하면 GPT와 Qwen이 각각 판별합니다.</p>
+            <p class="debug-line">AI 판별 입력은 LangSmith에 기록됩니다.</p>
           </div>
         </div>
 
@@ -433,6 +483,58 @@ onMounted(async () => {
             @input="autoResize"
           />
           <button class="primary-btn" :disabled="!chatInput.trim() || chatLoading" @click="sendChat">전송</button>
+        </div>
+      </section>
+
+      <section v-else-if="activeTab === 'file'" class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>파일 스팸 판별</h2>
+            <p>PDF · TXT · EML 파일을 업로드하면 스팸 여부를 판별합니다.</p>
+          </div>
+        </div>
+
+        <!-- Drop zone -->
+        <div v-if="!fileResult && !fileLoading"
+          class="file-dropzone"
+          :class="{ dragging: isDragging }"
+          @dragover="onFileDragover"
+          @dragleave="onFileDragleave"
+          @drop="onFileDrop"
+          @click="fileInputRef?.click()"
+        >
+          <input ref="fileInputRef" type="file" accept="*" style="display:none" @change="onFileInputChange" />
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#667eea" stroke-width="1.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <p class="drop-main">여기에 파일을 드래그하거나 클릭하여 선택</p>
+          <p class="drop-sub">PDF · DOCX · XLSX · PPTX · HWP · TXT · EML 등 모든 파일</p>
+          <p v-if="fileError" class="file-err">{{ fileError }}</p>
+        </div>
+
+        <!-- Loading -->
+        <div v-if="fileLoading" class="file-loading">
+          <div class="file-spinner" />
+          <p>파일 분석 중...</p>
+        </div>
+
+        <!-- Result -->
+        <div v-if="fileResult" class="file-result">
+          <div class="file-verdict" :class="fileResult.is_spam ? 'spam' : 'ham'">
+            <span>{{ fileResult.is_spam ? '🚨 스팸 파일' : '✅ 정상 파일' }}</span>
+            <span class="file-name">{{ fileResult.filename }}</span>
+          </div>
+          <div v-for="r in fileResult.replies" :key="r.model" class="file-model-card" :class="r.is_spam ? 'spam' : 'ham'">
+            <div class="file-model-label">{{ r.model }}</div>
+            <div class="file-model-body">{{ r.reply }}</div>
+          </div>
+          <div v-if="fileResult.extracted_text" class="file-model-card">
+            <div class="file-model-label">추출 텍스트 미리보기</div>
+            <div class="file-model-body">{{ fileResult.extracted_text }}</div>
+          </div>
+          <button class="secondary-btn" @click="fileResult = null; fileError = ''">다른 파일 검사</button>
         </div>
       </section>
 
@@ -1060,4 +1162,56 @@ onMounted(async () => {
     grid-template-columns: 1fr;
   }
 }
+
+/* 파일 판별 */
+.file-dropzone {
+  border: 2px dashed #d1d5db;
+  border-radius: 14px;
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  margin-bottom: 16px;
+}
+.file-dropzone:hover, .file-dropzone.dragging {
+  border-color: #667eea;
+  background: #f5f3ff;
+}
+.drop-main { font-size: 14px; font-weight: 500; color: #374151; margin: 12px 0 4px; }
+.drop-sub  { font-size: 12px; color: #9ca3af; margin: 0; }
+.file-err  { color: #ef4444; font-size: 13px; margin-top: 10px; }
+.file-loading {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 14px; padding: 48px 0; color: #667eea;
+}
+.file-spinner {
+  width: 36px; height: 36px;
+  border: 3px solid #e5e7eb;
+  border-top-color: #667eea;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.file-result { display: flex; flex-direction: column; gap: 12px; }
+.file-verdict {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 20px; border-radius: 12px; font-weight: 700; font-size: 15px;
+}
+.file-verdict.spam { background: #fef2f2; border: 1.5px solid #fca5a5; color: #dc2626; }
+.file-verdict.ham  { background: #f0fdf4; border: 1.5px solid #86efac; color: #16a34a; }
+.file-name { font-size: 12px; font-weight: 400; color: #6b7280; }
+.file-model-card {
+  padding: 14px 16px; border-radius: 12px; border: 1px solid #e5e7eb;
+}
+.file-model-card.spam { background: #fff7f7; }
+.file-model-card.ham  { background: #f7fff9; }
+.file-model-label { font-size: 12px; font-weight: 600; color: #667eea; margin-bottom: 6px; }
+.file-model-body  { font-size: 13px; color: #374151; line-height: 1.6; white-space: pre-wrap; }
+.secondary-btn {
+  padding: 10px 20px; border-radius: 10px;
+  border: 1.5px solid #667eea; background: #fff;
+  color: #667eea; font-size: 14px; font-weight: 600;
+  cursor: pointer; transition: background 0.2s;
+}
+.secondary-btn:hover { background: #f0f0ff; }
 </style>

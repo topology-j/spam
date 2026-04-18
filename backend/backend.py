@@ -18,6 +18,7 @@ import os
 import io
 import csv
 import uuid
+import re
 from datetime import datetime, timedelta, timezone
 from langsmith import traceable
 from langsmith import Client as LangSmithClient
@@ -142,6 +143,185 @@ def load_dataset_rows(split: str, max_samples: Optional[int] = None):
     if max_samples is not None:
         rows = rows[:max_samples]
     return rows
+
+
+def _hangul_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    hangul = sum(1 for ch in text if "\uac00" <= ch <= "\ud7a3")
+    return hangul / max(len(text), 1)
+
+
+def _score_decoded_text(text: str) -> tuple[float, int]:
+    if not text:
+        return (-1.0, 0)
+    cleaned = text.strip()
+    if not cleaned:
+        return (-0.5, 0)
+    replacement_penalty = cleaned.count("\ufffd") * 3
+    mojibake_penalty = cleaned.count("Ã") + cleaned.count("Â") + cleaned.count("ì") * 0.1
+    hangul_bonus = _hangul_ratio(cleaned) * 100
+    printable_bonus = sum(1 for ch in cleaned if ch.isprintable()) / max(len(cleaned), 1) * 10
+    score = hangul_bonus + printable_bonus - replacement_penalty - mojibake_penalty
+    return (score, len(cleaned))
+
+
+def _decode_bytes_best_effort(content: bytes) -> str:
+    candidates = []
+    for enc in ("utf-8", "utf-8-sig", "cp949", "euc-kr", "iso-8859-1", "latin-1"):
+        try:
+            decoded = content.decode(enc)
+            candidates.append((_score_decoded_text(decoded), decoded))
+        except Exception:
+            continue
+    if not candidates:
+        return content.decode("utf-8", errors="replace")
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _repair_mojibake_text(text: str) -> str:
+    candidates = [text]
+    for src_enc, dst_enc in (
+        ("latin-1", "utf-8"),
+        ("cp1252", "utf-8"),
+        ("latin-1", "cp949"),
+        ("cp1252", "cp949"),
+    ):
+        try:
+            repaired = text.encode(src_enc, errors="ignore").decode(dst_enc, errors="ignore")
+            if repaired:
+                candidates.append(repaired)
+        except Exception:
+            continue
+
+    candidates = list(dict.fromkeys(candidates))
+    scored = [(_score_decoded_text(candidate), candidate) for candidate in candidates]
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
+def _strip_html_tags(text: str) -> str:
+    text = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return text
+
+
+def _normalize_extracted_text(text: str) -> str:
+    text = _repair_mojibake_text(text)
+    text = text.replace("\x00", " ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _extract_text_from_eml(content: bytes) -> str:
+    from email import policy
+    from email.header import decode_header, make_header
+    from email.parser import BytesParser
+
+    msg = BytesParser(policy=policy.default).parsebytes(content)
+    parts = []
+
+    subject = msg.get("subject")
+    if subject:
+        try:
+            decoded_subject = str(make_header(decode_header(subject)))
+        except Exception:
+            decoded_subject = subject
+        parts.append(f"제목: {decoded_subject}")
+
+    def decode_part(part) -> str:
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            payload = (part.get_payload() or "").encode("utf-8", errors="ignore")
+        charset = part.get_content_charset()
+        if charset:
+            try:
+                return payload.decode(charset)
+            except Exception:
+                pass
+        return _decode_bytes_best_effort(payload)
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            content_type = part.get_content_type()
+            disposition = (part.get("Content-Disposition") or "").lower()
+            if "attachment" in disposition:
+                continue
+            body = decode_part(part)
+            if content_type == "text/html":
+                body = _strip_html_tags(body)
+            parts.append(body)
+    else:
+        body = decode_part(msg)
+        if msg.get_content_type() == "text/html":
+            body = _strip_html_tags(body)
+        parts.append(body)
+
+    return _normalize_extracted_text("\n".join(p for p in parts if p))
+
+
+def _extract_text_from_hwp_preview(content: bytes) -> str:
+    import olefile
+
+    with olefile.OleFileIO(io.BytesIO(content)) as ole:
+        if not ole.exists("PrvText"):
+            return ""
+        raw = ole.openstream("PrvText").read()
+
+    for enc in ("utf-16", "utf-16-le", "cp949", "euc-kr"):
+        try:
+            text = raw.decode(enc)
+            if text.strip():
+                return _normalize_extracted_text(text)
+        except Exception:
+            continue
+    return ""
+
+
+def _extract_text_from_hwp_body(content: bytes) -> str:
+    import olefile
+    import zlib
+
+    candidates = []
+    with olefile.OleFileIO(io.BytesIO(content)) as ole:
+        section_paths = [
+            entry for entry in ole.listdir()
+            if len(entry) == 2 and entry[0] == "BodyText" and entry[1].startswith("Section")
+        ]
+        section_paths.sort(key=lambda entry: entry[1])
+
+        for entry in section_paths:
+            raw = ole.openstream(entry).read()
+            byte_candidates = [raw]
+            for wbits in (-15, zlib.MAX_WBITS):
+                try:
+                    byte_candidates.append(zlib.decompress(raw, wbits))
+                except Exception:
+                    continue
+
+            for payload in byte_candidates:
+                for enc in ("utf-16-le", "utf-16", "cp949", "euc-kr"):
+                    try:
+                        decoded = payload.decode(enc, errors="ignore")
+                        normalized = _normalize_extracted_text(decoded)
+                        if normalized:
+                            candidates.append(normalized)
+                    except Exception:
+                        continue
+
+    if not candidates:
+        return ""
+
+    scored = [(_score_decoded_text(text), text) for text in candidates]
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
 
 
 def init_db():
@@ -702,7 +882,7 @@ def _build_model_reply(model_name: str, result: dict) -> dict:
     if not result:
         return {
             "model": model_name,
-            "reply": f"[{model_name}] ?먮퀎 寃곌낵瑜?諛쏆? 紐삵뻽?듬땲??",
+            "reply": f"[{model_name}] 분석 결과를 받지 못했습니다.",
             "is_spam": False,
             "error": True,
         }
@@ -715,13 +895,13 @@ def _build_model_reply(model_name: str, result: dict) -> dict:
             "error": True,
         }
 
-    verdict = "?ㅽ뙵" if result.get("is_spam") else "?뺤긽"
+    verdict = "스팸" if result.get("is_spam") else "정상"
     raw_answer = (result.get("raw_answer") or "").strip()
     if raw_answer:
-        reply = f"[{model_name}] {verdict}?쇰줈 ?먮떒?덉뒿?덈떎.\n{raw_answer}"
+        reply = f"[{model_name}] {verdict}으로 판단했습니다.\n{raw_answer}"
     else:
-        reason = "?ㅽ뙵 ?뱀쭠??媛먯??섏뿀?듬땲??" if result.get("is_spam") else "?뺤긽 硫붿떆吏濡?蹂댁엯?덈떎."
-        reply = f"[{model_name}] {verdict}?쇰줈 ?먮떒?덉뒿?덈떎. {reason}"
+        reason = "스팸 징후가 감지되었습니다." if result.get("is_spam") else "정상 메시지로 보입니다."
+        reply = f"[{model_name}] {verdict}으로 판단했습니다. {reason}"
 
     return {
         "model": model_name,
@@ -736,17 +916,17 @@ def _classify_with_both_models(text: str) -> list[dict]:
     print(f"[LangSmith][path] /chat -> _classify_with_both_models text_len={len(text)}")
     if not _rag_available:
         is_spam = detect_spam(text)
-        fallback_verdict = "?ㅽ뙵" if is_spam else "?뺤긽"
+        fallback_verdict = "스팸" if is_spam else "정상"
         return [
             {
                 "model": "GPT",
-                "reply": f"[GPT] {fallback_verdict}?쇰줈 ?먮떒?덉뒿?덈떎. ?꾩옱 GPT ?붿쭊???ъ슜?????놁뼱 洹쒖튃 湲곕컲 寃곌낵瑜????蹂댁뿬以띾땲??",
+                "reply": f"[GPT] {fallback_verdict}으로 판단했습니다. 현재 GPT 엔진을 사용할 수 없어 규칙 기반 결과를 대신 보여줍니다.",
                 "is_spam": is_spam,
                 "error": True,
             },
             {
                 "model": "Qwen",
-                "reply": f"[Qwen] {fallback_verdict}?쇰줈 ?먮떒?덉뒿?덈떎. ?꾩옱 Qwen ?붿쭊???ъ슜?????놁뼱 洹쒖튃 湲곕컲 寃곌낵瑜????蹂댁뿬以띾땲??",
+                "reply": f"[Qwen] {fallback_verdict}으로 판단했습니다. 현재 Qwen 엔진을 사용할 수 없어 규칙 기반 결과를 대신 보여줍니다.",
                 "is_spam": is_spam,
                 "error": True,
             },
@@ -833,24 +1013,109 @@ async def chat_file(file: UploadFile = File(...), user=Depends(get_current_user)
     content = await file.read()
     filename = file.filename or "파일"
     text = ""
+    extracted_via = "unknown"
 
-    if filename.lower().endswith(".pdf"):
-        try:
-            import pypdf
-            reader = pypdf.PdfReader(io.BytesIO(content))
-            for page in reader.pages:
-                text += (page.extract_text() or "")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"PDF 읽기 실패: {str(e)}")
-    else:
-        try:
-            text = content.decode("utf-8")
-        except Exception:
-            text = content.decode("latin-1", errors="ignore")
+    fn = filename.lower()
+    try:
+        if fn.endswith(".pdf"):
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(content)) as pdf:
+                for page in pdf.pages:
+                    text += (page.extract_text() or "")
+            extracted_via = "pdfplumber"
+            if not text.strip():
+                try:
+                    import pypdf
+                    reader = pypdf.PdfReader(io.BytesIO(content))
+                    text = "\n".join((page.extract_text() or "") for page in reader.pages)
+                    extracted_via = "pypdf"
+                except Exception:
+                    pass
+        elif fn.endswith(".docx"):
+            import docx
+            doc = docx.Document(io.BytesIO(content))
+            text = "\n".join(p.text for p in doc.paragraphs)
+            extracted_via = "docx"
+        elif fn.endswith(".xlsx") or fn.endswith(".xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    text += " ".join(str(c) for c in row if c is not None) + "\n"
+            extracted_via = "openpyxl"
+        elif fn.endswith(".pptx"):
+            from pptx import Presentation
+            prs = Presentation(io.BytesIO(content))
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text += shape.text + "\n"
+            extracted_via = "pptx"
+        elif fn.endswith(".hwpx"):
+            import zipfile, xml.etree.ElementTree as ET
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                for name in z.namelist():
+                    if name.startswith("Contents/") and name.endswith(".xml"):
+                        root = ET.fromstring(z.read(name))
+                        for elem in root.iter():
+                            if elem.text:
+                                text += elem.text + " "
+            extracted_via = "hwpx"
+        elif fn.endswith(".hwp"):
+            import subprocess, tempfile
+            with tempfile.NamedTemporaryFile(suffix=".hwp", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                backend_dir = os.path.dirname(os.path.abspath(__file__))
+                env = os.environ.copy()
+                env["PYTHONPATH"] = backend_dir + os.pathsep + env.get("PYTHONPATH", "")
+                result = subprocess.run(
+                    [sys.executable, "-m", "hwp5.hwp5txt", tmp_path],
+                    capture_output=True,
+                    timeout=30,
+                    cwd=backend_dir,
+                    env=env,
+                )
+                text = _decode_bytes_best_effort(result.stdout).strip()
+                extracted_via = "hwp5txt"
+                if not text:
+                    preview_text = _extract_text_from_hwp_preview(content)
+                    if preview_text:
+                        text = preview_text
+                        extracted_via = "hwp-preview"
+                if not text:
+                    body_text = _extract_text_from_hwp_body(content)
+                    if body_text:
+                        text = body_text
+                        extracted_via = "hwp-body"
+                if not text and result.stderr:
+                    raise Exception(_decode_bytes_best_effort(result.stderr)[:200])
+            finally:
+                os.unlink(tmp_path)
+        elif fn.endswith(".eml"):
+            text = _extract_text_from_eml(content)
+            extracted_via = "eml-parser"
+        else:
+            text = _decode_bytes_best_effort(content)
+            extracted_via = "best-effort-bytes"
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"파일 읽기 실패: {str(e)}")
 
-    text = text.strip()
+    text = _normalize_extracted_text(text)
+    print(
+        f"[file-upload] filename={filename!r} extracted_len={len(text)} "
+        f"hangul_ratio={_hangul_ratio(text):.3f} via={extracted_via} preview={text[:80]!r}"
+    )
     if not text:
-        raise HTTPException(status_code=400, detail="파일에서 텍스트를 추출할 수 없습니다")
+        ext = os.path.splitext(filename)[1].lower() or "unknown"
+        if ext in {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}:
+            detail = f"파일에서 텍스트를 추출할 수 없습니다. 스캔형 {ext} 파일일 가능성이 큽니다."
+        else:
+            detail = f"파일에서 텍스트를 추출할 수 없습니다. 확장자={ext}, 추출기={extracted_via}"
+        raise HTTPException(status_code=400, detail=detail)
 
     replies = _classify_with_both_models(text)
     final_is_spam = any(item["is_spam"] for item in replies if not item.get("error"))
@@ -1614,6 +1879,3 @@ def finetune_apply(job_id: str, user=Depends(require_role("admin"))):
 @app.get("/")
 def root():
     return {"status": "ok"}
-
-
-
