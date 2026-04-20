@@ -41,6 +41,12 @@ const router = createRouter({
       component: () => import('../views/AdminView.vue'),
       meta: { requiresAuth: true, role: 'admin' },
     },
+    {
+      path: '/langsmith',
+      name: 'langsmith',
+      component: () => import('../views/LangSmithView.vue'),
+      meta: { requiresAuth: true, role: 'developer' },
+    },
   ],
 })
 
@@ -69,7 +75,7 @@ router.beforeEach((to) => {
       ? to.meta.role
       : [to.meta.role]
 
-    if (!allowed.includes(effectiveRole)) {
+    if (!allowed.includes(effectiveRole) && !allowed.includes(role)) {
       if (effectiveRole === 'admin') return { path: '/admin' }
       if (effectiveRole === 'counselor') return { path: '/counselor' }
       return { path: '/user' }

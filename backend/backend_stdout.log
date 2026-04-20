@@ -1,0 +1,7 @@
+[LangSmith] TRACING=None PROJECT=None ENDPOINT=https://api.smith.langchain.com KEY=...
+[DEBUG] VS_DIR=C:\Users\green\Desktop\스팸데이터\backend\vectorstore, index=19169325 bytes
+✅ FAISS 벡터스토어 로드 완료 (3120개 벡터)
+??RAG ?붿쭊 濡쒕뱶 ?꾨즺 (GPT + Qwen)
+[LangSmith][startup] TRACING=None PROJECT=None ENDPOINT=https://api.smith.langchain.com KEY=...
+[DEBUG] VS_DIR=C:\Users\green\Desktop\스팸데이터\backend\vectorstore, index=19169325 bytes
+✅ FAISS 벡터스토어 로드 완료 (3120개 벡터)

@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 
-const API = 'http://127.0.0.1:8000'
+const API = 'http://127.0.0.1:8001'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem('token') ?? '')
@@ -9,6 +9,16 @@ export const useAuthStore = defineStore('auth', () => {
   const role = ref(localStorage.getItem('role') ?? '')
 
   const isLoggedIn = computed(() => !!token.value)
+
+  function handleUnauthorized() {
+    token.value = ''
+    username.value = ''
+    role.value = ''
+    localStorage.removeItem('token')
+    localStorage.removeItem('username')
+    localStorage.removeItem('role')
+    window.location.href = '/login'
+  }
 
   async function login(user: string, password: string) {
     const res = await fetch(`${API}/auth/login`, {
@@ -40,5 +50,5 @@ export const useAuthStore = defineStore('auth', () => {
     return { Authorization: `Bearer ${token.value}`, 'Content-Type': 'application/json' }
   }
 
-  return { token, username, role, isLoggedIn, login, logout, authHeader }
+  return { token, username, role, isLoggedIn, login, logout, authHeader, handleUnauthorized }
 })

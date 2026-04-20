@@ -5,7 +5,7 @@ import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const router = useRouter()
-const API = 'http://127.0.0.1:8000'
+const API = 'http://127.0.0.1:8001'
 
 const mode = ref<'login' | 'register'>('login')
 

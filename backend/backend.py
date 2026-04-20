@@ -19,6 +19,8 @@ import io
 import csv
 import uuid
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from langsmith import traceable
 from langsmith import Client as LangSmithClient
@@ -59,6 +61,8 @@ app.add_middleware(
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 24
+ALLOW_RAG_DIRECT_LEARN = os.getenv("ALLOW_RAG_DIRECT_LEARN", "false").strip().lower() == "true"
+ALLOW_REPORT_VECTORSTORE_LEARN = os.getenv("ALLOW_REPORT_VECTORSTORE_LEARN", "false").strip().lower() == "true"
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
@@ -106,6 +110,11 @@ def log_chat_input_to_langsmith(text: str, username: str):
 def log_report_input_to_langsmith(text: str, username: str):
     log_input_to_langsmith("report_input_raw", text, username)
 
+
+def _ensure_learning_enabled(flag: bool, detail: str):
+    if not flag:
+        raise HTTPException(status_code=403, detail=detail)
+
 # ?????????????????????????????
 # DB
 # ?????????????????????????????
@@ -121,8 +130,8 @@ def get_db():
 def load_dataset_rows(split: str, max_samples: Optional[int] = None):
     base_dir = os.path.dirname(__file__)
     split_files = {
-        "train": os.path.join(base_dir, "..", "train.csv"),
-        "val": os.path.join(base_dir, "..", "val.csv"),
+        "train": os.path.join(base_dir, "..", "train_split.csv"),
+        "val": os.path.join(base_dir, "..", "val_split.csv"),
         "test": os.path.join(base_dir, "..", "test.csv"),
     }
 
@@ -143,6 +152,59 @@ def load_dataset_rows(split: str, max_samples: Optional[int] = None):
     if max_samples is not None:
         rows = rows[:max_samples]
     return rows
+
+
+def _resolve_dataset_path(split: str) -> str:
+    base_dir = os.path.dirname(__file__)
+    split_files = {
+        "train": os.path.join(base_dir, "..", "train_split.csv"),
+        "val": os.path.join(base_dir, "..", "val_split.csv"),
+        "test": os.path.join(base_dir, "..", "test.csv"),
+    }
+    dataset_path = split_files.get(split)
+    if not dataset_path:
+        raise HTTPException(status_code=400, detail="split은 'train', 'val', 'test' 중 하나여야 합니다.")
+    if not os.path.exists(dataset_path):
+        raise HTTPException(status_code=404, detail=f"{split} 데이터 파일이 없습니다: {os.path.basename(dataset_path)}")
+    return os.path.abspath(dataset_path)
+
+
+def _load_eval_dataset(split: str, max_samples: Optional[int] = None):
+    import pandas as pd
+
+    eval_csv_path = _resolve_dataset_path(split)
+    df = pd.read_csv(eval_csv_path, encoding="utf-8-sig").dropna(subset=["text", "label"])
+    df["label"] = df["label"].astype(str).str.strip().str.lower()
+
+    effective_df = df.head(max_samples).copy() if max_samples is not None else df.copy()
+    rows = [
+        {"text": row["text"], "label": row["label"]}
+        for row in effective_df.to_dict(orient="records")
+        if row.get("text") and row.get("label")
+    ]
+    return {
+        "rows": rows,
+        "eval_csv_path": eval_csv_path,
+        "row_count": int(len(df)),
+        "effective_row_count": len(rows),
+        "first_3_titles": df["title"].head(3).tolist() if "title" in df.columns else "NO TITLE COL",
+    }
+
+
+def _log_eval_dataset(mode: str, split: str, eval_csv_path: str, row_count: int, first_3_titles, effective_row_count: int, model_path: str):
+    import pandas as pd
+    try:
+        df_tmp = pd.read_csv(eval_csv_path, encoding="utf-8-sig").dropna(subset=["text", "label"])
+        label_count = df_tmp["label"].str.strip().str.lower().value_counts().to_dict()
+    except Exception as e:
+        label_count = f"ERROR: {e}"
+    print("==== DEBUG START ====")
+    print("MODE:", mode)
+    print("SPLIT:", split)
+    print("FILE PATH:", eval_csv_path)
+    print("ROW COUNT:", row_count)
+    print("LABEL COUNT:", label_count)
+    print("=====================")
 
 
 def _hangul_ratio(text: str) -> float:
@@ -487,8 +549,9 @@ def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security)):
 
 def require_role(*roles):
     def checker(user=Depends(get_current_user)):
-        effective = "admin" if user["role"] == "developer" else user["role"]
-        if effective not in roles:
+        original = user["role"]
+        effective = "admin" if original == "developer" else original
+        if effective not in roles and original not in roles:
             raise HTTPException(status_code=403, detail="沅뚰븳 ?놁쓬")
         return user
     return checker
@@ -497,13 +560,34 @@ def require_role(*roles):
 # ?????????????????????????????
 # RAG ?붿쭊 濡쒕뱶 (GPT / Qwen)
 # ?????????????????????????????
+_rag_add_to_vectorstore = None
 try:
-    from rag_engine import classify_with_gpt, classify_with_qwen, add_to_vectorstore
+    from rag_engine import classify_with_gpt, classify_with_qwen, add_to_vectorstore as _rag_add_to_vectorstore
     _rag_available = True
     print("??RAG ?붿쭊 濡쒕뱶 ?꾨즺 (GPT + Qwen)")
 except Exception as e:
     print(f"?좑툘  RAG ?붿쭊 濡쒕뱶 ?ㅽ뙣: {e}")
     _rag_available = False
+
+
+_eval_write_guard = ContextVar("eval_write_guard", default=False)
+
+
+@contextmanager
+def _evaluation_write_blocked():
+    token = _eval_write_guard.set(True)
+    try:
+        yield
+    finally:
+        _eval_write_guard.reset(token)
+
+
+def add_to_vectorstore(text: str, label: str) -> bool:
+    if _eval_write_guard.get():
+        raise RuntimeError("add_to_vectorstore() is blocked during evaluation paths")
+    if _rag_add_to_vectorstore is None:
+        raise RuntimeError("RAG vectorstore backend is not available")
+    return _rag_add_to_vectorstore(text, label)
 
 
 # ?????????????????????????????
@@ -565,7 +649,7 @@ def login(req: LoginReq):
     user = cur.fetchone()
     conn.close()
     if not user or not pwd_context.verify(req.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="?꾩씠???먮뒗 鍮꾨?踰덊샇媛 ?щ컮瑜댁? ?딆뒿?덈떎")
+        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 맞지 않습니다")
     return {"token": create_token(user["id"], user["username"], user["role"]), "username": user["username"], "role": user["role"]}
 
 
@@ -789,12 +873,15 @@ def update_report(report_id: int, req: ReportUpdateReq, user=Depends(require_rol
         if req.status == "completed":
             note = (req.counselor_note or "").lower()
             label = "spam" if "?ㅽ뙵" in note else "ham"
-        try:
-            added = add_to_vectorstore(report["email_content"], label)
-            if added:
-                print(f"??vectorstore ?낅뜲?댄듃: [{label}] report_id={report_id}")
-        except Exception as e:
-            print(f"?좑툘  vectorstore ?낅뜲?댄듃 ?ㅽ뙣: {e}")
+        if ALLOW_REPORT_VECTORSTORE_LEARN:
+            try:
+                added = add_to_vectorstore(report["email_content"], label)
+                if added:
+                    print(f"??vectorstore ?낅뜲?댄듃: [{label}] report_id={report_id}")
+            except Exception as e:
+                print(f"?좑툘  vectorstore ?낅뜲?댄듃 ?ㅽ뙣: {e}")
+        else:
+            print(f"[SAFEGUARD] report-based vectorstore learning blocked for report_id={report_id}")
 
     return {"message": "?낅뜲?댄듃 ?꾨즺"}
 
@@ -1433,6 +1520,10 @@ class RagLearnReq(BaseModel):
 @app.post("/rag/learn")
 def rag_learn(req: RagLearnReq, user=Depends(require_role("admin", "counselor"))):
     """?섎룞?쇰줈 ?덉떆瑜?vectorstore??異붽?"""
+    _ensure_learning_enabled(
+        ALLOW_RAG_DIRECT_LEARN,
+        "직접 vectorstore 학습은 기본 비활성화되어 있습니다. 누수 방지를 위해 명시적으로 허용해야 합니다.",
+    )
     if req.label not in ("spam", "ham"):
         raise HTTPException(status_code=400, detail="label? 'spam' ?먮뒗 'ham'?댁뼱???⑸땲??")
     if not _rag_available:
@@ -1467,7 +1558,9 @@ def rag_train(user=Depends(require_role("admin"))):
         CACHE_META = os.path.join(VS_DIR, "cache_meta.pkl")
         os.makedirs(VS_DIR, exist_ok=True)
 
-        train_csv = os.path.join(BASE, "..", "train.csv")
+        train_csv = os.path.join(BASE, "..", "train_split.csv")
+        if not os.path.exists(train_csv):
+            raise HTTPException(status_code=400, detail="train_split.csv가 없습니다. split_data.py를 먼저 실행해주세요.")
         df = pd.read_csv(train_csv).dropna(subset=["text", "label"])
         texts = df["text"].tolist()
         labels = df["label"].tolist()
@@ -1508,11 +1601,11 @@ def rag_train(user=Depends(require_role("admin"))):
         import rag_engine
         rag_engine._load_vectorstore()
 
-        # training_corrections 추가
+        # training_corrections 중 train 학습에서 나온 보정만 다시 반영
         conn = get_db()
         cur = conn.cursor()
         try:
-            cur.execute("SELECT text, label FROM training_corrections")
+            cur.execute("SELECT text, label FROM training_corrections WHERE source='improve_train'")
             corrections = cur.fetchall()
         except Exception:
             corrections = []
@@ -1544,7 +1637,16 @@ def _get_embeddings(client, texts: list, batch_size=100):
     return np.array(all_emb, dtype="float32")
 
 
-def _eval_with_model(rows, model_fn):
+def _eval_with_model(rows, model_fn, model_name: str, eval_debug: dict):
+    _log_eval_dataset(
+        mode=eval_debug["mode"],
+        split=eval_debug["split"],
+        eval_csv_path=eval_debug["eval_csv_path"],
+        row_count=eval_debug["row_count"],
+        first_3_titles=eval_debug["first_3_titles"],
+        effective_row_count=eval_debug["effective_row_count"],
+        model_path=model_name,
+    )
     tp = tn = fp = fn = 0
     fp_list = []  # 오탐: 정상인데 스팸으로 잘못 판정
     fn_list = []  # 미탐: 스팸인데 정상으로 놓침
@@ -1589,32 +1691,43 @@ def rag_val(split: str = "val", max_samples: int = 120, mode: str = "fast", user
     if not _rag_available:
         raise HTTPException(status_code=503, detail="RAG 서비스를 사용할 수 없습니다.")
 
-    rows = load_dataset_rows(split, max_samples)
+    eval_data = _load_eval_dataset(split, max_samples)
+    rows = eval_data["rows"]
 
     if not rows:
         raise HTTPException(status_code=404, detail=f"{split} 데이터가 없습니다.")
 
     if mode == "fast":
         from rag_engine import fast_classify
+        _log_eval_dataset(
+            mode=mode,
+            split=split,
+            eval_csv_path=eval_data["eval_csv_path"],
+            row_count=eval_data["row_count"],
+            first_3_titles=eval_data["first_3_titles"],
+            effective_row_count=eval_data["effective_row_count"],
+            model_path="fast_classify",
+        )
         tp = tn = fp = fn = 0
         fp_list = []
         fn_list = []
-        for row in rows:
-            actual_spam = (row["label"] == "spam")
-            text = row["text"]
-            result = fast_classify(text)
-            predicted_spam = bool(result) if result is not None else False
-            text_preview = text[:120]
-            if actual_spam and predicted_spam:
-                tp += 1
-            elif not actual_spam and not predicted_spam:
-                tn += 1
-            elif not actual_spam and predicted_spam:
-                fp += 1
-                fp_list.append(text_preview)
-            elif actual_spam and not predicted_spam:
-                fn += 1
-                fn_list.append(text_preview)
+        with _evaluation_write_blocked():
+            for row in rows:
+                actual_spam = (row["label"] == "spam")
+                text = row["text"]
+                result = fast_classify(text)
+                predicted_spam = bool(result) if result is not None else False
+                text_preview = text[:120]
+                if actual_spam and predicted_spam:
+                    tp += 1
+                elif not actual_spam and not predicted_spam:
+                    tn += 1
+                elif not actual_spam and predicted_spam:
+                    fp += 1
+                    fp_list.append(text_preview)
+                elif actual_spam and not predicted_spam:
+                    fn += 1
+                    fn_list.append(text_preview)
         total = tp + tn + fp + fn
         accuracy  = (tp + tn) / total if total else 0
         precision = tp / (tp + fp) if (tp + fp) else 0
@@ -1633,16 +1746,27 @@ def rag_val(split: str = "val", max_samples: int = 120, mode: str = "fast", user
             "mode": "fast",
             "gpt": fast_result,
             "qwen": fast_result,
+            "eval_debug": {
+                **eval_data,
+                "mode": mode,
+            },
         }
 
-    gpt_result  = _eval_with_model(rows, classify_with_gpt)
-    qwen_result = _eval_with_model(rows, classify_with_qwen)
+    eval_debug = {
+        **eval_data,
+        "mode": mode,
+        "split": split,
+    }
+    with _evaluation_write_blocked():
+        gpt_result  = _eval_with_model(rows, classify_with_gpt, "classify_with_gpt", eval_debug)
+        qwen_result = _eval_with_model(rows, classify_with_qwen, "classify_with_qwen", eval_debug)
 
     return {
         "split": split,
         "mode": "llm",
         "gpt":  {"model": "GPT-4o-mini",  **gpt_result},
         "qwen": {"model": "Qwen2.5-7b",   **qwen_result},
+        "eval_debug": eval_debug,
     }
 
 
@@ -1664,36 +1788,47 @@ def rag_improve(
     if not _rag_available:
         raise HTTPException(status_code=503, detail="RAG ?붿쭊???ъ슜?????놁뒿?덈떎.")
 
-    rows = load_dataset_rows(split, max_samples)
+    eval_data = _load_eval_dataset(split, max_samples)
+    rows = eval_data["rows"]
 
     if not rows:
         raise HTTPException(status_code=404, detail=f"{split} ?곗씠???놁쓬")
 
     from rag_engine import fast_classify
+    _log_eval_dataset(
+        mode=mode,
+        split=split,
+        eval_csv_path=eval_data["eval_csv_path"],
+        row_count=eval_data["row_count"],
+        first_3_titles=eval_data["first_3_titles"],
+        effective_row_count=eval_data["effective_row_count"],
+        model_path="fast_classify" if mode == "fast" else "classify_with_gpt",
+    )
 
     tp = tn = fp = fn = 0
     misclassified = []
 
-    for row in rows:
-        text, true_label = row["text"], row["label"]
-        actual_spam = (true_label == "spam")
+    with _evaluation_write_blocked():
+        for row in rows:
+            text, true_label = row["text"], row["label"]
+            actual_spam = (true_label == "spam")
 
-        if mode == "fast":
-            result = fast_classify(text)
-            if result is None:
-                continue
-            predicted_spam = result
-        else:
-            try:
-                result = classify_with_gpt(text)
-                predicted_spam = result.get("is_spam", False)
-            except Exception:
-                predicted_spam = False
+            if mode == "fast":
+                result = fast_classify(text)
+                if result is None:
+                    continue
+                predicted_spam = result
+            else:
+                try:
+                    result = classify_with_gpt(text)
+                    predicted_spam = result.get("is_spam", False)
+                except Exception:
+                    predicted_spam = False
 
-        if actual_spam and predicted_spam:       tp += 1
-        elif not actual_spam and not predicted_spam: tn += 1
-        elif not actual_spam and predicted_spam:     fp += 1; misclassified.append((text, "ham"))
-        elif actual_spam and not predicted_spam:     fn += 1; misclassified.append((text, "spam"))
+            if actual_spam and predicted_spam:       tp += 1
+            elif not actual_spam and not predicted_spam: tn += 1
+            elif not actual_spam and predicted_spam:     fp += 1; misclassified.append((text, "ham"))
+            elif actual_spam and not predicted_spam:     fn += 1; misclassified.append((text, "spam"))
 
     total = tp + tn + fp + fn
     accuracy  = (tp + tn) / total if total else 0
@@ -1701,22 +1836,29 @@ def rag_improve(
     recall    = tp / (tp + fn) if (tp + fn) else 0
     f1        = 2 * precision * recall / (precision + recall) if (precision + recall) else 0
 
-    # ?ㅻ텇瑜??덉떆 vectorstore + training_corrections DB??異붽? (dry_run?대㈃ ?ㅽ궢)
+    # 검증/테스트 데이터는 평가 전용으로만 사용한다.
     added = 0
-    if not dry_run:
+    improve_note = ""
+    learned = False
+    if not dry_run and split == "train":
+        learned = True
         conn2 = get_db()
         cur2 = conn2.cursor()
         for text, correct_label in misclassified:
             if add_to_vectorstore(text, correct_label):
                 added += 1
             cur2.execute(
-                "INSERT INTO training_corrections (text, label, source) VALUES (?, ?, 'improve')",
+                "INSERT INTO training_corrections (text, label, source) VALUES (?, ?, 'improve_train')",
                 (text, correct_label)
             )
         conn2.commit()
         conn2.close()
+    elif split in ("val", "test"):
+        improve_note = f"{split} split은 평가 전용이라 vectorstore에 반영하지 않았습니다."
+    elif dry_run:
+        improve_note = "dry_run=True라 vectorstore에 반영하지 않았습니다."
 
-    # ?대젰 ???    conn = get_db()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT COALESCE(MAX(iteration), 0) + 1 FROM improvement_history")
     next_iter = cur.fetchone()[0]
@@ -1741,6 +1883,13 @@ def rag_improve(
         "tp": tp, "tn": tn, "fp": fp, "fn": fn,
         "misclassified_count": len(misclassified),
         "added_to_vectorstore": added,
+        "learned": learned,
+        "note": improve_note,
+        "eval_debug": {
+            **eval_data,
+            "mode": mode,
+            "split": split,
+        },
     }
 
 
@@ -1876,6 +2025,69 @@ def finetune_apply(job_id: str, user=Depends(require_role("admin"))):
 # ?????????????????????????????
 # ROOT
 # ?????????????????????????????
+@app.get("/langsmith/runs")
+def langsmith_runs(limit: int = 50, user=Depends(require_role("developer"))):
+    try:
+        client = get_langsmith_client()
+        if not client:
+            raise HTTPException(status_code=503, detail="LangSmith 키가 설정되지 않았습니다.")
+        project = os.getenv("LANGSMITH_PROJECT", "spam-detector")
+        runs = list(client.list_runs(project_name=project, limit=limit))
+        result = []
+        for r in runs:
+            result.append({
+                "id": str(r.id),
+                "name": r.name,
+                "run_type": r.run_type,
+                "status": r.status,
+                "start_time": r.start_time.isoformat() if r.start_time else None,
+                "end_time": r.end_time.isoformat() if r.end_time else None,
+                "latency_ms": int((r.end_time - r.start_time).total_seconds() * 1000) if r.start_time and r.end_time else None,
+                "total_tokens": getattr(r, "total_tokens", None),
+                "prompt_tokens": getattr(r, "prompt_tokens", None),
+                "completion_tokens": getattr(r, "completion_tokens", None),
+                "inputs": r.inputs,
+                "outputs": r.outputs,
+                "error": r.error,
+            })
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/langsmith/stats")
+def langsmith_stats(user=Depends(require_role("developer"))):
+    try:
+        client = get_langsmith_client()
+        if not client:
+            raise HTTPException(status_code=503, detail="LangSmith 키가 설정되지 않았습니다.")
+        project = os.getenv("LANGSMITH_PROJECT", "spam-detector")
+        runs = list(client.list_runs(project_name=project, limit=100))
+        total = len(runs)
+        errors = sum(1 for r in runs if r.error)
+        latencies = [(r.end_time - r.start_time).total_seconds() * 1000
+                     for r in runs if r.start_time and r.end_time]
+        avg_latency = int(sum(latencies) / len(latencies)) if latencies else 0
+        total_tokens = sum(getattr(r, "total_tokens", 0) or 0 for r in runs)
+        by_name: dict = {}
+        for r in runs:
+            by_name.setdefault(r.name, 0)
+            by_name[r.name] += 1
+        return {
+            "total": total,
+            "errors": errors,
+            "avg_latency_ms": avg_latency,
+            "total_tokens": total_tokens,
+            "by_name": by_name,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/")
 def root():
     return {"status": "ok"}

@@ -25,7 +25,7 @@ export const useSpamStore = defineStore('spam', () => {
     loading.value = true
 
     try {
-      const res = await fetch('http://127.0.0.1:8000/chat', {
+      const res = await fetch('http://127.0.0.1:8001/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
@@ -65,7 +65,7 @@ export const useSpamStore = defineStore('spam', () => {
       const token = localStorage.getItem('token') ?? ''
       const form = new FormData()
       form.append('file', file)
-      const res = await fetch('http://127.0.0.1:8000/chat/file', {
+      const res = await fetch('http://127.0.0.1:8001/chat/file', {
         method: 'POST',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: form,

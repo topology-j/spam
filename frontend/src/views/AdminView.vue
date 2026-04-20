@@ -5,11 +5,12 @@ import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const router = useRouter()
-const API = 'http://127.0.0.1:8000'
+const API = 'http://127.0.0.1:8001'
 
-type Tab = 'rag' | 'compare' | 'reports' | 'keywords' | 'users' | 'profile'
+type Tab = 'rag' | 'compare' | 'reports' | 'keywords' | 'users' | 'reviews' | 'profile'
 type Role = 'user' | 'counselor' | 'admin' | 'developer'
 type Split = 'train' | 'val' | 'test'
+type EvalMode = 'fast' | 'llm'
 
 interface Report {
   id: number
@@ -76,6 +77,7 @@ interface Metrics {
 
 interface ValResult {
   split: Split
+  mode: EvalMode
   gpt: Metrics
   qwen: Metrics
 }
@@ -144,6 +146,7 @@ const trainMsg = ref('')
 const trainErr = ref('')
 const valLoading = ref(false)
 const valSplit = ref<Split>('val')
+const valMode = ref<EvalMode>('llm')
 const valMaxSamples = 120
 const valResult = ref<ValResult | null>(null)
 const valErr = ref('')
@@ -219,7 +222,7 @@ const latestKeywordDate = computed(() => {
 const bestModelLabel = computed(() => {
   if (bestModel.value === 'gpt') return 'GPT'
   if (bestModel.value === 'qwen') return 'Qwen'
-  return '미선택'
+  return 'Unselected'
 })
 
 function authHeaders() {
@@ -228,7 +231,7 @@ function authHeaders() {
     localStorage.getItem('access_token') ||
     localStorage.getItem('authToken')
 
-  // 🔥 토큰 없으면 헤더 자체를 안 보냄
+  // 토큰 없으면 빈 객체 반환
   if (!token) return {}
 
   return {
@@ -250,6 +253,10 @@ function metricClass(value: number) {
   if (value >= 0.9) return 'good'
   if (value >= 0.75) return 'mid'
   return 'bad'
+}
+
+function evalModeLabel(mode: EvalMode) {
+  return mode === 'llm' ? '실제 모델' : '빠른 휴리스틱'
 }
 
 async function loadReports() {
@@ -317,7 +324,7 @@ async function addKeyword() {
       return
     }
     keywordInput.value = ''
-    keywordMsg.value = '키워드를 등록했습니다.'
+    keywordMsg.value = '키워드가 등록됐습니다.'
     await Promise.all([loadKeywords(), loadRagStatus()])
   } finally {
     keywordSaving.value = false
@@ -339,7 +346,7 @@ async function deleteKeyword(id: number) {
       keywordErr.value = data.detail || '키워드 삭제에 실패했습니다.'
       return
     }
-    keywordMsg.value = '키워드를 삭제했습니다.'
+    keywordMsg.value = '키워드가 삭제됐습니다.'
     await Promise.all([loadKeywords(), loadRagStatus()])
   } finally {
     keywordDeleting.value = null
@@ -394,7 +401,8 @@ async function runVal() {
   valLoading.value = true
 
   try {
-    const url = `${API}/rag/val?split=${valSplit.value}&mode=fast&max_samples=${valMaxSamples}`
+    const url = `${API}/rag/val?split=${valSplit.value}&mode=${valMode.value}&max_samples=${valMaxSamples}`
+    console.log('RAG VAL REQUEST URL:', url)
 
     const res = await fetch(url, {
       method: 'GET',
@@ -410,7 +418,7 @@ async function runVal() {
       data = { raw: text }
     }
 
-    console.log('검증 결과:', data)
+    console.log('검증결과:', data)
 
     if (!res.ok) {
       valErr.value = data.detail || data.raw || `실패 (${res.status})`
@@ -419,20 +427,19 @@ async function runVal() {
 
     valResult.value = {
       split: data.split || valSplit.value,
+      mode: data.mode || valMode.value,
       gpt: data.gpt || data.gpt_result || {},
       qwen: data.qwen || data.qwen_result || {},
     }
 
   } catch (e: any) {
-    valErr.value = `에러: ${e?.message || String(e)}`
+    valErr.value = `오류: ${e?.message || String(e)}`
   } finally {
     valLoading.value = false
   }
 }
 
 async function runSplitEval(split: Split) {
-  alert(`👉 runSplitEval 호출됨: ${split}`)
-
   valSplit.value = split
   await runVal()
 }
@@ -462,7 +469,8 @@ async function runImprove() {
       return
     }
     improveResult.value = data
-    improveMsg.value = `개선 ${data.iteration}회차 완료: F1 ${pct(Number(data.f1 ?? 0))}, 추가 예시 ${Number(data.added_to_vectorstore ?? 0)}건`
+    const baseMsg = `개선 ${data.iteration}회차 완료: F1 ${pct(Number(data.f1 ?? 0))}, 추가 예시 ${Number(data.added_to_vectorstore ?? 0)}건`
+    improveMsg.value = data.note ? `${baseMsg} (${data.note})` : baseMsg
     await Promise.all([loadImproveHistory(), loadRagStatus()])
   } finally {
     improveLoading.value = false
@@ -487,7 +495,7 @@ async function runCompare() {
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
-      compareErr.value = data.detail || '판별 실행에 실패했습니다.'
+      compareErr.value = data.detail || '비교 실행에 실패했습니다.'
       return
     }
     compareResult.value = data
@@ -566,7 +574,7 @@ async function saveProfile() {
       profileErr.value = data.detail || '프로필 저장에 실패했습니다.'
       return
     }
-    profileMsg.value = '프로필을 저장했습니다.'
+    profileMsg.value = '프로필을 업데이트했습니다.'
     profilePwForm.value = { current_password: '', new_password: '', confirm_password: '' }
     profileEdit.value = false
     await loadProfile()
@@ -575,12 +583,40 @@ async function saveProfile() {
   }
 }
 
+interface CounselorReview {
+  id: number
+  report_id: number
+  reviewer: string
+  counselor_name: string
+  stars: number
+  comment: string
+  accuracy_stars: number
+  processing_stars: number
+  clarity_stars: number
+  speed_stars: number
+  email_content: string
+  created_at: string
+}
+const allReviews = ref<CounselorReview[]>([])
+
+async function loadAllReviews() {
+  const res = await fetch(`${API}/counselor-reviews`, { headers: authHeaders() })
+  if (res.ok) allReviews.value = await res.json()
+}
+
+const avgStars = computed(() =>
+  allReviews.value.length
+    ? (allReviews.value.reduce((s, r) => s + r.stars, 0) / allReviews.value.length).toFixed(1)
+    : '-'
+)
+
 async function switchTab(tab: Tab) {
   activeTab.value = tab
   if (tab === 'rag') await Promise.all([loadRagStatus(), loadImproveHistory()])
   if (tab === 'reports') await loadReports()
   if (tab === 'keywords') await Promise.all([loadKeywords(), loadSettings()])
   if (tab === 'users') await loadUsers()
+  if (tab === 'reviews') await loadAllReviews()
   if (tab === 'profile') await loadProfile()
 }
 
@@ -623,11 +659,13 @@ onMounted(async () => {
       </div>
 
       <nav class="nav-list">
-        <button :class="['nav-btn', { active: activeTab === 'rag' }]" @click="switchTab('rag')">RAG 평가</button>
-        <button :class="['nav-btn', { active: activeTab === 'compare' }]" @click="switchTab('compare')">AI 비교 판별</button>
+        <button :class="['nav-btn', { active: activeTab === 'rag' }]" @click="switchTab('rag')">RAG 관리</button>
+        <button :class="['nav-btn', { active: activeTab === 'compare' }]" @click="switchTab('compare')">AI 비교 분석</button>
         <button :class="['nav-btn', { active: activeTab === 'reports' }]" @click="switchTab('reports')">신고 처리</button>
-        <button :class="['nav-btn', { active: activeTab === 'keywords' }]" @click="switchTab('keywords')">스팸 키워드</button>
+        <button :class="['nav-btn', { active: activeTab === 'keywords' }]" @click="switchTab('keywords')">금지 키워드</button>
         <button :class="['nav-btn', { active: activeTab === 'users' }]" @click="switchTab('users')">사용자 관리</button>
+        <button :class="['nav-btn', { active: activeTab === 'reviews' }]" @click="switchTab('reviews')">상담 관리</button>
+        <button v-if="auth.role === 'developer'" class="nav-btn langsmith-btn" @click="router.push('/langsmith')">Open LangSmith</button>
         <button :class="['nav-btn', { active: activeTab === 'profile' }]" @click="switchTab('profile')">내 정보</button>
       </nav>
 
@@ -639,7 +677,7 @@ onMounted(async () => {
         <div class="panel-head">
           <div>
             <p class="panel-eyebrow">RAG Control</p>
-            <h2>RAG 평가</h2>
+            <h2>RAG 관리</h2>
           </div>
         </div>
 
@@ -673,15 +711,24 @@ onMounted(async () => {
 
             <div class="split-actions">
               <button :class="['dataset-btn', 'train', { active: valSplit === 'train' }]" :disabled="trainLoading || valLoading" @click="runTrainCheck">
-                {{ trainLoading || (valLoading && valSplit === 'train') ? '학습 중...' : '학습' }}
+                {{ trainLoading || (valLoading && valSplit === 'train') ? '실행 중...' : '학습' }}
               </button>
               <button type="button" :class="['dataset-btn', 'val', { active: valSplit === 'val' }]" :disabled="valLoading" @click="runSplitEval('val')">
-                {{ valLoading ? '검증 중...' : '검증' }}
+                {{ valLoading && valSplit === 'val' ? '실행 중...' : '검증' }}
               </button>
               <button :class="['dataset-btn', 'test', { active: valSplit === 'test' }]" :disabled="valLoading" @click="runSplitEval('test')">
-                {{ valLoading && valSplit === 'test' ? '테스트 중...' : '테스트' }}
+                {{ valLoading && valSplit === 'test' ? '실행 중...' : '테스트' }}
               </button>
             </div>
+            <div class="split-actions">
+              <button :class="['dataset-btn', { active: valMode === 'llm' }]" :disabled="valLoading" @click="valMode = 'llm'">
+                실제 모델
+              </button>
+              <button :class="['dataset-btn', { active: valMode === 'fast' }]" :disabled="valLoading" @click="valMode = 'fast'">
+                빠른 휴리스틱
+              </button>
+            </div>
+            <p class="helper-text">현재 평가 모드: {{ evalModeLabel(valMode) }}</p>
             <p v-if="trainMsg" class="msg ok">{{ trainMsg }}</p>
             <p v-if="trainErr" class="msg err">{{ trainErr }}</p>
             <p v-if="valErr" class="msg err">{{ valErr }}</p>
@@ -696,7 +743,7 @@ onMounted(async () => {
             </div>
             <div class="action-row">
               <button class="secondary-btn" :disabled="improveLoading" @click="runImprove">
-                {{ improveLoading ? '개선 중...' : '개선 실행' }}
+                {{ improveLoading ? '실행 중...' : '개선 실행' }}
               </button>
               <button class="ghost-btn" @click="resetTestLock">테스트 잠금 해제</button>
             </div>
@@ -722,13 +769,15 @@ onMounted(async () => {
               </div>
               <div>
                 <span class="stat-label">Test 상태</span>
-                <strong>{{ testLocked ? '실행 완료' : '실행 가능' }}</strong>
+                <strong>{{ testLocked ? '잠금됨' : '열림' }}</strong>
               </div>
             </div>
           </article>
         </div>
 
         <div v-if="valResult" class="metrics-grid">
+          <p class="helper-text metrics-note">현재 결과: {{ evalModeLabel(valResult.mode) }}</p>
+          <p v-if="valResult.mode === 'fast'" class="msg err">fast 모드는 같은 휴리스틱 결과를 GPT/Qwen 카드에 함께 표시합니다. 실제 모델 비교는 '실제 모델' 모드에서 확인하세요.</p>
           <article class="model-card">
             <div class="model-head">
               <h3>GPT</h3>
@@ -753,15 +802,15 @@ onMounted(async () => {
                 <strong>{{ pct(valResult.gpt.f1) }}</strong>
               </div>
             </div>
-            <p class="confusion">TP {{ valResult.gpt.tp }} · TN {{ valResult.gpt.tn }} · FP {{ valResult.gpt.fp }} · FN {{ valResult.gpt.fn }}</p>
+            <p class="confusion">TP {{ valResult.gpt.tp }} / TN {{ valResult.gpt.tn }} / FP {{ valResult.gpt.fp }} / FN {{ valResult.gpt.fn }}</p>
             <div v-if="valResult.gpt.fp_list?.length" class="detail-section">
-              <p class="detail-label fp-label">🚨 오탐 (정상 → 스팸 판정, {{ valResult.gpt.fp_list.length }}건)</p>
+              <p class="detail-label fp-label">오탐 (정상인데 스팸으로 분류, {{ valResult.gpt.fp_list.length }}건)</p>
               <ul class="detail-list">
                 <li v-for="(txt, i) in valResult.gpt.fp_list" :key="'gpt-fp-'+i" class="detail-item fp-item">{{ txt }}</li>
               </ul>
             </div>
             <div v-if="valResult.gpt.fn_list?.length" class="detail-section">
-              <p class="detail-label fn-label">❌ 미탐 (스팸 → 정상 판정, {{ valResult.gpt.fn_list.length }}건)</p>
+              <p class="detail-label fn-label">미탐 (스팸인데 정상으로 분류, {{ valResult.gpt.fn_list.length }}건)</p>
               <ul class="detail-list">
                 <li v-for="(txt, i) in valResult.gpt.fn_list" :key="'gpt-fn-'+i" class="detail-item fn-item">{{ txt }}</li>
               </ul>
@@ -792,15 +841,15 @@ onMounted(async () => {
                 <strong>{{ pct(valResult.qwen.f1) }}</strong>
               </div>
             </div>
-            <p class="confusion">TP {{ valResult.qwen.tp }} · TN {{ valResult.qwen.tn }} · FP {{ valResult.qwen.fp }} · FN {{ valResult.qwen.fn }}</p>
+            <p class="confusion">TP {{ valResult.qwen.tp }} / TN {{ valResult.qwen.tn }} / FP {{ valResult.qwen.fp }} / FN {{ valResult.qwen.fn }}</p>
             <div v-if="valResult.qwen.fp_list?.length" class="detail-section">
-              <p class="detail-label fp-label">🚨 오탐 (정상 → 스팸 판정, {{ valResult.qwen.fp_list.length }}건)</p>
+              <p class="detail-label fp-label">오탐 (정상인데 스팸으로 분류, {{ valResult.qwen.fp_list.length }}건)</p>
               <ul class="detail-list">
                 <li v-for="(txt, i) in valResult.qwen.fp_list" :key="'qwen-fp-'+i" class="detail-item fp-item">{{ txt }}</li>
               </ul>
             </div>
             <div v-if="valResult.qwen.fn_list?.length" class="detail-section">
-              <p class="detail-label fn-label">❌ 미탐 (스팸 → 정상 판정, {{ valResult.qwen.fn_list.length }}건)</p>
+              <p class="detail-label fn-label">미탐 (스팸인데 정상으로 분류, {{ valResult.qwen.fn_list.length }}건)</p>
               <ul class="detail-list">
                 <li v-for="(txt, i) in valResult.qwen.fn_list" :key="'qwen-fn-'+i" class="detail-item fn-item">{{ txt }}</li>
               </ul>
@@ -816,18 +865,18 @@ onMounted(async () => {
             </div>
           </div>
 
-          <div v-if="improveResult" class="improve-highlight">
-            최근 개선 {{ improveResult.iteration }}회차 · F1 {{ pct(improveResult.f1) }} · 오분류 {{ improveResult.misclassified_count }}건 · 추가 예시 {{ improveResult.added_to_vectorstore }}건
-          </div>
+        <div v-if="improveResult" class="improve-highlight">
+          최근 개선 {{ improveResult.iteration }}회차 / F1 {{ pct(improveResult.f1) }} / 오분류 {{ improveResult.misclassified_count }}건 / 추가 예시 {{ improveResult.added_to_vectorstore }}건
+        </div>
 
-          <div v-if="improveHistory.length" class="history-grid">
-            <article v-for="item in improveHistory.slice().reverse()" :key="item.iteration" class="history-card">
-              <strong>{{ item.iteration }}회차</strong>
-              <p>F1 {{ pct(item.f1) }} · 정확도 {{ pct(item.accuracy) }}</p>
-              <p>추가 예시 {{ item.added_count }}건 · mode {{ item.mode }}</p>
-            </article>
-          </div>
-          <div v-else class="empty-state">아직 개선 이력이 없습니다.</div>
+        <div v-if="improveHistory.length" class="history-grid">
+          <article v-for="item in improveHistory.slice().reverse()" :key="item.iteration" class="history-card">
+            <strong>{{ item.iteration }}회차</strong>
+            <p>F1 {{ pct(item.f1) }} / 정확도 {{ pct(item.accuracy) }}</p>
+            <p>추가 예시 {{ item.added_count }}건 / mode {{ item.mode }}</p>
+          </article>
+        </div>
+        <div v-else class="empty-state">아직 개선 이력이 없습니다.</div>
         </div>
       </section>
 
@@ -835,18 +884,18 @@ onMounted(async () => {
         <div class="panel-head">
           <div>
             <p class="panel-eyebrow">Model Compare</p>
-            <h2>GPT / Qwen 비교 판별</h2>
+            <h2>GPT / Qwen 모델 비교</h2>
           </div>
         </div>
 
-        <textarea v-model="compareText" class="wide-textarea" rows="5" placeholder="비교할 문장이나 메시지를 입력하세요." />
+        <textarea v-model="compareText" class="wide-textarea" rows="5" placeholder="모델이 판단할 메시지를 입력해주세요" />
         <button class="primary-btn fit" :disabled="compareLoading" @click="runCompare">
-          {{ compareLoading ? '판별 중...' : '두 모델 동시에 판별' }}
+          {{ compareLoading ? '실행 중...' : '두 모델 동시 비교' }}
         </button>
         <p v-if="compareErr" class="msg err">{{ compareErr }}</p>
 
         <div v-if="compareResult" class="compare-summary" :class="compareResult.final_is_spam ? 'spam' : 'ham'">
-          최종 판정: {{ compareResult.final_is_spam ? '스팸' : '정상' }} · {{ compareResult.agreement ? '두 모델 일치' : '두 모델 불일치' }}
+          최종 판정: {{ compareResult.final_is_spam ? '스팸' : '정상' }} / {{ compareResult.agreement ? '두 모델 동의' : '두 모델 불일치' }}
         </div>
 
         <div v-if="compareResult" class="compare-grid">
@@ -856,7 +905,7 @@ onMounted(async () => {
               <span :class="['verdict', compareResult.gpt.is_spam ? 'spam' : 'ham']">{{ compareResult.gpt.is_spam ? '스팸' : '정상' }}</span>
             </div>
             <p class="raw-answer">{{ compareResult.gpt.raw_answer || '응답 없음' }}</p>
-            <p class="confusion">참조 예시 {{ compareResult.gpt.retrieved_count ?? 0 }}개</p>
+            <p class="confusion">유사 예시 {{ compareResult.gpt.retrieved_count ?? 0 }}건</p>
           </article>
 
           <article class="model-card">
@@ -865,7 +914,7 @@ onMounted(async () => {
               <span :class="['verdict', compareResult.qwen.is_spam ? 'spam' : 'ham']">{{ compareResult.qwen.is_spam ? '스팸' : '정상' }}</span>
             </div>
             <p class="raw-answer">{{ compareResult.qwen.raw_answer || '응답 없음' }}</p>
-            <p class="confusion">참조 예시 {{ compareResult.qwen.retrieved_count ?? 0 }}개</p>
+            <p class="confusion">유사 예시 {{ compareResult.qwen.retrieved_count ?? 0 }}건</p>
           </article>
         </div>
       </section>
@@ -899,15 +948,15 @@ onMounted(async () => {
                 <textarea v-model="reportNote" rows="4" class="wide-textarea" />
               </label>
               <label class="field">
-                <span>등록할 스팸 키워드</span>
-                <textarea v-model="reportKeywords" rows="4" class="wide-textarea" placeholder="한 줄에 하나씩 입력하세요." />
+                <span>추가할 금지 키워드</span>
+                <textarea v-model="reportKeywords" rows="4" class="wide-textarea" placeholder="한 줄에 키워드 하나씩 입력하세요." />
               </label>
               <div class="action-row">
-                <button class="secondary-btn" :disabled="reportSaving" @click="updateReport('processing')">처리중 저장</button>
+                <button class="secondary-btn" :disabled="reportSaving" @click="updateReport('processing')">처리 중</button>
                 <button class="primary-btn fit" :disabled="reportSaving" @click="updateReport('done')">완료 처리</button>
               </div>
             </template>
-            <div v-else class="empty-state">왼쪽 목록에서 신고를 선택하세요.</div>
+            <div v-else class="empty-state">신고를 선택하면 상세 내용이 표시됩니다.</div>
           </div>
         </div>
       </section>
@@ -916,7 +965,7 @@ onMounted(async () => {
         <div class="panel-head">
           <div>
             <p class="panel-eyebrow">Keyword Library</p>
-            <h2>스팸 키워드 관리</h2>
+            <h2>금지 키워드 관리</h2>
           </div>
           <button :class="['toggle-btn', { on: reportEnabled }]" @click="toggleReportEnabled">
             {{ reportEnabled ? '신고 기능 ON' : '신고 기능 OFF' }}
@@ -925,7 +974,7 @@ onMounted(async () => {
 
         <div class="stats-grid">
           <article class="stat-card">
-            <span class="stat-label">전체 키워드</span>
+            <span class="stat-label">총 키워드</span>
             <strong>{{ keywords.length }}</strong>
           </article>
           <article class="stat-card">
@@ -939,9 +988,9 @@ onMounted(async () => {
         </div>
 
         <div class="keyword-form">
-          <input v-model="keywordInput" class="text-input" placeholder="새 스팸 키워드를 입력하세요." @keyup.enter="addKeyword" />
+          <input v-model="keywordInput" class="text-input" placeholder="금지어 키워드를 입력해주세요" @keyup.enter="addKeyword" />
           <button class="primary-btn fit" :disabled="keywordSaving" @click="addKeyword">
-            {{ keywordSaving ? '등록 중...' : '키워드 등록' }}
+            {{ keywordSaving ? '저장 중...' : '키워드 추가' }}
           </button>
         </div>
         <p v-if="keywordMsg" class="msg ok">{{ keywordMsg }}</p>
@@ -975,7 +1024,7 @@ onMounted(async () => {
                 <th>닉네임</th>
                 <th>이름</th>
                 <th>역할</th>
-                <th>변경</th>
+                <th>역할 변경</th>
                 <th>가입일</th>
               </tr>
             </thead>
@@ -999,13 +1048,58 @@ onMounted(async () => {
         </div>
       </section>
 
+      <section v-else-if="activeTab === 'reviews'" class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-eyebrow">Reviews</p>
+            <h2>상담 리뷰 현황</h2>
+          </div>
+          <button class="ghost-btn" @click="loadAllReviews">새로고침</button>
+        </div>
+        <div v-if="!allReviews.length" class="empty-row">리뷰 데이터가 없습니다.</div>
+        <div v-else>
+          <div class="review-summary-bar">
+            <span>총 <strong>{{ allReviews.length }}</strong>건</span>
+            <span>평균 별점 <strong>{{ avgStars }}</strong> / 5</span>
+          </div>
+          <table class="review-table">
+            <thead>
+              <tr>
+                <th>리뷰어</th>
+                <th>상담사</th>
+                <th>별점</th>
+                <th>정확도</th>
+                <th>처리속도</th>
+                <th>명확성</th>
+                <th>신속성</th>
+                <th>코멘트</th>
+                <th>일시</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in allReviews" :key="r.id">
+                <td>{{ r.reviewer }}</td>
+                <td>{{ r.counselor_name ?? '-' }}</td>
+                <td class="stars-cell">{{ '★'.repeat(r.stars) }}{{ '☆'.repeat(5 - r.stars) }}</td>
+                <td>{{ r.accuracy_stars ?? '-' }}</td>
+                <td>{{ r.processing_stars ?? '-' }}</td>
+                <td>{{ r.clarity_stars ?? '-' }}</td>
+                <td>{{ r.speed_stars ?? '-' }}</td>
+                <td class="comment-cell">{{ r.comment || '-' }}</td>
+                <td>{{ new Date(r.created_at).toLocaleDateString('ko-KR') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section v-else class="panel">
         <div class="panel-head">
           <div>
             <p class="panel-eyebrow">Profile</p>
             <h2>내 정보</h2>
           </div>
-          <button class="ghost-btn" @click="profileEdit = !profileEdit">{{ profileEdit ? '편집 취소' : '편집 시작' }}</button>
+          <button class="ghost-btn" @click="profileEdit = !profileEdit">{{ profileEdit ? '수정 취소' : '수정 하기' }}</button>
         </div>
 
         <div v-if="profile" class="profile-grid">
@@ -1618,6 +1712,7 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  gap: 12px;
 }
 
 .empty-state {
@@ -1687,6 +1782,18 @@ onMounted(async () => {
   color: #b91c1c;
 }
 
+.helper-text {
+  margin: 12px 0 0;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.metrics-note {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
 @media (max-width: 1120px) {
   .admin-shell {
     grid-template-columns: 1fr;
@@ -1710,4 +1817,21 @@ onMounted(async () => {
     padding: 18px;
   }
 }
+.review-summary-bar {
+  display: flex; gap: 24px; margin-bottom: 16px;
+  font-size: 14px; color: #555;
+}
+.review-table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+}
+.review-table th {
+  background: #f3f4f6; padding: 8px 10px; text-align: left;
+  font-weight: 600; color: #374151; border-bottom: 2px solid #e5e7eb;
+}
+.review-table td {
+  padding: 8px 10px; border-bottom: 1px solid #f3f4f6; vertical-align: top;
+}
+.stars-cell { color: #f59e0b; letter-spacing: -1px; }
+.comment-cell { max-width: 200px; word-break: break-all; color: #6b7280; }
+.empty-row { padding: 40px; text-align: center; color: #6b7280; }
 </style>

@@ -229,7 +229,7 @@ def _parse_result(answer: str, model_name: str, text: str, examples: list[dict])
     verdict_line = next((line for line in lines if line.startswith("판정:")), lines[0] if lines else "")
     model_says_spam = "스팸" in verdict_line and "정상" not in verdict_line
     clear_spam_signal = _has_clear_spam_signal(text, examples)
-    is_spam = clear_spam_signal
+    is_spam = model_says_spam or clear_spam_signal
     return {
         "model": model_name,
         "is_spam": is_spam,
@@ -270,11 +270,11 @@ def fast_classify(text: str, k: int = 7) -> bool:
         return None
     first = examples[0]
     spam_votes = sum(1 for e in examples if e["label"] == "spam")
-    strong_spam_match = (
-        first["label"] == "spam"
-        and first["distance"] <= 1.24
-        and spam_votes >= 5
-    )
+    # 가장 가까운 이웃이 spam이고 거리가 가까우면 신호 강함
+    closest_is_spam = first["label"] == "spam" and first["distance"] <= 1.5
+    # 다수결: 7개 중 3개 이상 스팸
+    majority_spam = spam_votes >= 3
+    strong_spam_match = closest_is_spam or majority_spam
     return strong_spam_match and _has_spam_signals(text)
 
 

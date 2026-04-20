@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const router = useRouter()
-const API = 'http://127.0.0.1:8000'
+const API = 'http://127.0.0.1:8001'
 
 type Tab = 'chat' | 'file' | 'report' | 'keywords' | 'rules' | 'profile'
 
@@ -22,9 +22,13 @@ interface Report {
   email_content: string
   status: string
   counselor_note: string
+  counselor_id: number | null
   counselor_nickname: string | null
   counselor_username: string | null
   created_at: string
+  review_id: number | null
+  review_stars: number | null
+  review_comment: string | null
 }
 
 interface SpamRule {
@@ -148,6 +152,86 @@ const statusLabel: Record<string, string> = {
   done: '완료',
 }
 
+const doneUnreviewed = computed(() =>
+  reports.value.filter(r => r.status === 'done' && r.counselor_id && !r.review_id).length
+)
+
+// ── 별점 평가 모달 ─────────────────────────────────────
+const reviewModal = ref(false)
+const reviewReport = ref<Report | null>(null)
+const reviewComment = ref('')
+const reviewLoading = ref(false)
+const reviewSuccess = ref(false)
+
+interface CategoryRating { stars: number; hover: number }
+const categories = ref<Record<string, CategoryRating>>({
+  accuracy:   { stars: 0, hover: 0 },
+  processing: { stars: 0, hover: 0 },
+  clarity:    { stars: 0, hover: 0 },
+  speed:      { stars: 0, hover: 0 },
+})
+const categoryLabels: Record<string, string> = {
+  accuracy:   '안내 정확도',
+  processing: '처리 정확성',
+  clarity:    '설명 이해도',
+  speed:      '응답 속도',
+}
+const categoryDescs: Record<string, string> = {
+  accuracy:   '정확한 정보로 안내했는지',
+  processing: '스팸 처리가 제대로 됐는지',
+  clarity:    '설명이 이해하기 쉬웠는지',
+  speed:      '응답이 빠르게 왔는지',
+}
+
+function openReview(r: Report) {
+  reviewReport.value = r
+  categories.value = {
+    accuracy:   { stars: 0, hover: 0 },
+    processing: { stars: 0, hover: 0 },
+    clarity:    { stars: 0, hover: 0 },
+    speed:      { stars: 0, hover: 0 },
+  }
+  reviewComment.value = ''
+  reviewSuccess.value = false
+  reviewModal.value = true
+}
+
+const canSubmitReview = computed(() =>
+  categories.value.accuracy.stars > 0 &&
+  categories.value.processing.stars > 0 &&
+  categories.value.clarity.stars > 0 &&
+  categories.value.speed.stars > 0
+)
+
+async function submitReview() {
+  if (!canSubmitReview.value || !reviewReport.value || reviewLoading.value) return
+  reviewLoading.value = true
+  const c = categories.value
+  const avg = Math.round((c.accuracy.stars + c.processing.stars + c.clarity.stars) / 3)
+  try {
+    const res = await fetch(`${API}/counselor-reviews`, {
+      method: 'POST',
+      headers: auth.authHeader(),
+      body: JSON.stringify({
+        report_id: reviewReport.value.id,
+        stars: avg,
+        comment: reviewComment.value.trim(),
+        accuracy_stars: c.accuracy.stars,
+        processing_stars: c.processing.stars,
+        clarity_stars: c.clarity.stars,
+        speed_stars: c.speed.stars,
+      }),
+    })
+    if (res.ok) {
+      reviewSuccess.value = true
+      await loadReports()
+      setTimeout(() => { reviewModal.value = false }, 1500)
+    }
+  } finally {
+    reviewLoading.value = false
+  }
+}
+
 const ruleTypeLabel: Record<string, string> = {
   keyword: '단어',
   sentence: '문장',
@@ -172,6 +256,16 @@ function parseAiMessage(message: string) {
     return { model: 'AI', body: message }
   }
   return { model: match[1], body: match[2] || '' }
+}
+
+function hideEntry(firstAiId: number) {
+  const idx = messages.value.findIndex(m => m.id === firstAiId)
+  if (idx === -1) return
+  let end = idx
+  while (end < messages.value.length && messages.value[end].role === 'ai') end++
+  // 바로 앞 user 메시지도 함께 제거
+  const start = idx > 0 && messages.value[idx - 1].role === 'user' ? idx - 1 : idx
+  messages.value.splice(start, end - start)
 }
 
 const chatEntries = computed(() => {
@@ -425,7 +519,10 @@ onMounted(async () => {
         <nav class="nav">
           <button :class="['nav-btn', { active: activeTab === 'chat' }]" @click="activeTab = 'chat'">AI 판별</button>
           <button :class="['nav-btn', { active: activeTab === 'file' }]" @click="activeTab = 'file'">파일 판별</button>
-          <button :class="['nav-btn', { active: activeTab === 'report' }]" @click="activeTab = 'report'">상담 요청</button>
+          <button :class="['nav-btn', { active: activeTab === 'report' }]" @click="activeTab = 'report'">
+            상담 요청
+            <span v-if="doneUnreviewed" class="nav-badge">{{ doneUnreviewed }}</span>
+          </button>
           <button :class="['nav-btn', { active: activeTab === 'keywords' }]" @click="activeTab = 'keywords'">스팸 단어 목록</button>
           <button :class="['nav-btn', { active: activeTab === 'rules' }]" @click="activeTab = 'rules'">내 규칙</button>
           <button :class="['nav-btn', { active: activeTab === 'profile' }]" @click="activeTab = 'profile'">내 정보</button>
@@ -454,20 +551,23 @@ onMounted(async () => {
               </div>
             </div>
 
-            <div v-else class="ai-compare-row">
-              <div
-                v-for="msg in entry.messages"
-                :key="msg.id"
-                class="ai-compare-card"
-                :class="{ spam: msg.is_spam === 1, ham: msg.is_spam === 0 }"
-              >
-                <div class="ai-compare-head">
-                  <span class="ai-model">{{ msg.modelName }}</span>
-                  <span v-if="msg.is_spam === 1" class="msg-badge spam-text">스팸</span>
-                  <span v-else-if="msg.is_spam === 0" class="msg-badge ham-text">정상</span>
+            <div v-else class="ai-entry-wrap">
+              <div class="ai-compare-row">
+                <div
+                  v-for="msg in entry.messages"
+                  :key="msg.id"
+                  class="ai-compare-card"
+                  :class="{ spam: msg.is_spam === 1, ham: msg.is_spam === 0 }"
+                >
+                  <div class="ai-compare-head">
+                    <span class="ai-model">{{ msg.modelName }}</span>
+                    <span v-if="msg.is_spam === 1" class="msg-badge spam-text">스팸</span>
+                    <span v-else-if="msg.is_spam === 0" class="msg-badge ham-text">정상</span>
+                  </div>
+                  <div class="ai-compare-body">{{ msg.body || msg.message }}</div>
                 </div>
-                <div class="ai-compare-body">{{ msg.body || msg.message }}</div>
               </div>
+              <button class="entry-hide-btn" @click="hideEntry(entry.id)">✕ 결과 지우기</button>
             </div>
           </div>
           <div v-if="chatLoading" class="loading">판별 중...</div>
@@ -573,6 +673,22 @@ onMounted(async () => {
             <p v-if="report.counselor_note" class="card-note">
               상담사 답변: {{ report.counselor_note }}
             </p>
+            <div class="rc-review">
+              <div v-if="report.review_id" class="review-done">
+                <span v-for="i in 5" :key="i" class="star" :class="{ filled: i <= (report.review_stars ?? 0) }">★</span>
+                <span class="review-done-label">평가 완료</span>
+              </div>
+              <button
+                v-else-if="report.status === 'done' && report.counselor_id"
+                class="btn-review"
+                @click="openReview(report)"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+                상담사 평가하기
+              </button>
+            </div>
           </div>
         </div>
       </section>
@@ -701,6 +817,64 @@ onMounted(async () => {
         </div>
       </section>
     </main>
+
+    <!-- 별점 평가 모달 -->
+    <Transition name="modal">
+      <div v-if="reviewModal" class="modal-overlay" @click.self="reviewModal = false">
+        <div class="modal-card">
+          <div class="modal-header">
+            <h3 class="modal-title">상담사 평가</h3>
+            <button class="modal-close" @click="reviewModal = false">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+          <Transition name="fade">
+            <div v-if="reviewSuccess" class="review-success">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+              <p>평가해주셔서 감사합니다!</p>
+            </div>
+            <div v-else class="modal-body">
+              <p class="modal-desc">항목별로 평가해주세요</p>
+              <div class="category-list">
+                <div v-for="key in ['accuracy','processing','clarity','speed']" :key="key" class="category-row">
+                  <div class="cat-info">
+                    <span class="cat-name">{{ categoryLabels[key] }}</span>
+                    <span class="cat-desc">{{ categoryDescs[key] }}</span>
+                  </div>
+                  <div class="cat-stars">
+                    <span
+                      v-for="i in 5" :key="i"
+                      class="cat-star"
+                      :class="{ filled: i <= (categories[key].hover || categories[key].stars) }"
+                      @mouseenter="categories[key].hover = i"
+                      @mouseleave="categories[key].hover = 0"
+                      @click="categories[key].stars = i"
+                    >★</span>
+                  </div>
+                </div>
+              </div>
+              <textarea
+                v-model="reviewComment"
+                class="review-textarea"
+                placeholder="추가 의견을 남겨주세요 (선택)"
+                rows="2"
+              />
+              <button
+                class="btn-submit-review"
+                :disabled="!canSubmitReview || reviewLoading"
+                @click="submitReview"
+              >
+                {{ reviewLoading ? '제출 중...' : '평가 제출하기' }}
+              </button>
+            </div>
+          </Transition>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -1214,4 +1388,66 @@ onMounted(async () => {
   cursor: pointer; transition: background 0.2s;
 }
 .secondary-btn:hover { background: #f0f0ff; }
+.ai-entry-wrap { display: flex; flex-direction: column; gap: 6px; }
+.entry-hide-btn {
+  align-self: flex-end;
+  background: none;
+  border: 1px solid #e5e7eb;
+  cursor: pointer;
+  color: #9ca3af;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+}
+.entry-hide-btn:hover { color: #ef4444; border-color: #ef4444; background: #fee2e2; }
+.nav-badge {
+  background: #ef4444; color: #fff; border-radius: 999px;
+  font-size: 11px; padding: 1px 6px; margin-left: 6px;
+}
+.rc-review { margin-top: 8px; }
+.review-done { display: flex; align-items: center; gap: 4px; }
+.star { color: #d1d5db; font-size: 16px; }
+.star.filled { color: #f59e0b; }
+.review-done-label { font-size: 12px; color: #6b7280; margin-left: 4px; }
+.btn-review {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #4f46e5; color: #fff; border: none; border-radius: 8px;
+  padding: 6px 14px; font-size: 13px; cursor: pointer;
+}
+.btn-review:hover { background: #4338ca; }
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center; z-index: 999;
+}
+.modal-card {
+  background: #fff; border-radius: 16px; padding: 28px;
+  width: 420px; max-width: 95vw; box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+.modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.modal-title { font-size: 18px; font-weight: 700; }
+.modal-close { background: none; border: none; cursor: pointer; color: #6b7280; }
+.modal-desc { color: #6b7280; font-size: 14px; margin-bottom: 16px; }
+.category-list { display: flex; flex-direction: column; gap: 14px; margin-bottom: 16px; }
+.category-row { display: flex; justify-content: space-between; align-items: center; }
+.cat-info { display: flex; flex-direction: column; }
+.cat-name { font-weight: 600; font-size: 14px; }
+.cat-desc { font-size: 12px; color: #9ca3af; }
+.cat-stars { display: flex; gap: 4px; }
+.cat-star { font-size: 22px; cursor: pointer; color: #d1d5db; transition: color 0.15s; }
+.cat-star.filled { color: #f59e0b; }
+.review-textarea {
+  width: 100%; border: 1px solid #e5e7eb; border-radius: 8px;
+  padding: 10px; font-size: 14px; resize: none; margin-bottom: 14px; box-sizing: border-box;
+}
+.btn-submit-review {
+  width: 100%; background: #4f46e5; color: #fff; border: none;
+  border-radius: 10px; padding: 12px; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.btn-submit-review:disabled { opacity: 0.5; cursor: not-allowed; }
+.review-success { text-align: center; padding: 24px 0; color: #10b981; }
+.review-success p { margin-top: 12px; font-weight: 600; }
+.modal-enter-active, .modal-leave-active { transition: opacity 0.2s; }
+.modal-enter-from, .modal-leave-to { opacity: 0; }
+.fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>
